@@ -1,18 +1,18 @@
 ﻿#Requires -Version 5.1
 
 #  ╔══════════════════════════════════════════════════════════════════════════╗
-#  ║   LazyAzure  -  generate.ps1                                             ║
+#  ║   LazyBicep  -  generate.ps1                                             ║
 #  ║   Makes main.bicep from the map and the catalog                          ║
 #  ║                                                                          ║
 #  ║   Author  : Netmedia                                                     ║
 #  ║   Web     : https://netmedia.agency                                      ║
 #  ║   Email   : netmedia@netmedia.hr                                         ║
-#  ║   Product : LazyAzure  -  https://github.com/netmedia/lazyazure          ║
+#  ║   Product : LazyBicep  -  https://github.com/netmedia/lazybicep          ║
 #  ╚══════════════════════════════════════════════════════════════════════════╝
 
 <#
 .SYNOPSIS
-LazyAzure by Netmedia: makes infra/main.bicep from infra/infra.map.json and infra/catalog/.
+LazyBicep by Netmedia: makes infra/main.bicep from infra/infra.map.json and infra/catalog/.
 
 .AUTHOR
 Netmedia  |  https://netmedia.agency  |  netmedia@netmedia.hr
@@ -42,11 +42,11 @@ Shows the usage guide and exits.
 .\infra\generate.ps1
 
 .NOTES
-LazyAzure is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
-https://github.com/netmedia/lazyazure.
+LazyBicep is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
+https://github.com/netmedia/lazybicep.
 
 .LINK
-infra/LAZYAZURE.md
+infra/LAZYBICEP.md
 #>
 [CmdletBinding()]
 param(
@@ -75,14 +75,14 @@ function Show-Author {
         Write-Host "$(' ' * $left)$display$(' ' * ($pad - $left))" -NoNewline -ForegroundColor $color
         Write-Host $v -ForegroundColor Cyan
     }
-    $title = 'LazyAzure  -  generate.ps1'
+    $title = 'LazyBicep  -  generate.ps1'
     Write-Host ''
     Write-Host "  $([char]0x256D)$hLine$([char]0x256E)" -ForegroundColor Cyan
     Row ''
     Row "$esc[1m$title$esc[0m" $title 'Cyan'
     Row 'Makes main.bicep from the map and the catalog' -color 'White'
     Row ''
-    Row "by Netmedia$(if ($version) { "  |  LazyAzure $version" })" -color 'DarkGray'
+    Row "by Netmedia$(if ($version) { "  |  LazyBicep $version" })" -color 'DarkGray'
     Row 'https://netmedia.agency  |  netmedia@netmedia.hr' -color 'DarkGray'
     Row ''
     Write-Host "  $([char]0x2570)$hLine$([char]0x256F)" -ForegroundColor Cyan
@@ -107,7 +107,7 @@ function Show-Usage {
     & $y '  -Help  (-h)'
     & $d '    Shows this guide and exits.'
     Write-Host ''
-    & $d '  More: infra\LAZYAZURE.md ("The catalog")'
+    & $d '  More: infra\LAZYBICEP.md ("The catalog")'
     Write-Host ''
 }
 if ($Help) { Show-Author; Show-Usage; exit 0 }

@@ -1,29 +1,29 @@
 ﻿#Requires -Version 5.1
 
 #  ╔══════════════════════════════════════════════════════════════════════════╗
-#  ║   LazyAzure  -  azure-setup.ps1                                          ║
+#  ║   LazyBicep  -  azure-setup.ps1                                          ║
 #  ║   A project's Azure infrastructure from one map: set up, check, change   ║
 #  ║                                                                          ║
 #  ║   Author  : Netmedia                                                     ║
 #  ║   Web     : https://netmedia.agency                                      ║
 #  ║   Email   : netmedia@netmedia.hr                                         ║
-#  ║   Product : LazyAzure  -  https://github.com/netmedia/lazyazure          ║
+#  ║   Product : LazyBicep  -  https://github.com/netmedia/lazybicep          ║
 #  ╚══════════════════════════════════════════════════════════════════════════╝
 
 <#
 .SYNOPSIS
-LazyAzure by Netmedia: creates, checks and updates the whole Azure infrastructure of one environment, as
+LazyBicep by Netmedia: creates, checks and updates the whole Azure infrastructure of one environment, as
 infra/infra.map.json maps it; adds and removes resources of the map; starts the map of a new project.
 
 .AUTHOR
 Netmedia  |  https://netmedia.agency  |  netmedia@netmedia.hr
 
 .DESCRIPTION
-LazyAzure (infra/LAZYAZURE.md). One environment (prod, test, stag, dev, accp) with the Azure CLI.
+LazyBicep (infra/LAZYBICEP.md). One environment (prod, test, stag, dev, accp) with the Azure CLI.
 infra/infra.map.json lists its resources (apps, databases, queues, vaults, telemetry...), how they are
 named, asked, connected and checked; infra/main.bicep, generated from it by infra/generate.ps1, creates
 them. Then the apps' database users, the GitHub -> Azure trust, the GitHub environment with its variables
-and deployment tokens, and the custom domains. infra/lazyazure.ps1 is the same in a terminal UI.
+and deployment tokens, and the custom domains. infra/lazybicep.ps1 is the same in a terminal UI.
 
 It also changes the map: -AddResource adds a resource of the catalog (infra/catalog) with its
 connections, -RemoveResource takes one out, -Init starts the map of a new project.
@@ -98,7 +98,7 @@ Currency of the estimated monthly cost (Azure list prices from prices.azure.com)
 GBP...
 
 .PARAMETER Ui
-For infra/lazyazure.ps1: writes events instead of text (one JSON object per line, after '@@ui ') and
+For infra/lazybicep.ps1: writes events instead of text (one JSON object per line, after '@@ui ') and
 reads the answers from standard input, one per line. Needs -DryRun, -Check, -Start or -Remove.
 
 .PARAMETER AddResource
@@ -119,7 +119,7 @@ With -RemoveResource: the resource's key in the map.
 Starts the map of a new project (an empty instance): its name and prefix, then its resources.
 
 .PARAMETER SpecFile
-With -Init: a spec file with the project and its resources (infra/LAZYAZURE.md, "A new project"); no
+With -Init: a spec file with the project and its resources (infra/LAZYBICEP.md, "A new project"); no
 questions.
 
 .PARAMETER Help
@@ -152,11 +152,11 @@ registrations; the GitHub CLI signed in (gh auth login) as an admin of the repos
 Runs in Windows PowerShell 5.1 and PowerShell 7, from the repository root. If scripts are blocked:
 powershell -ExecutionPolicy Bypass -File .\infra\azure-setup.ps1
 
-LazyAzure is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
-https://github.com/netmedia/lazyazure.
+LazyBicep is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
+https://github.com/netmedia/lazybicep.
 
 .LINK
-infra/LAZYAZURE.md
+infra/LAZYBICEP.md
 #>
 [CmdletBinding()]
 param(
@@ -196,7 +196,7 @@ function Show-Author {
         Write-Host "$(' ' * $left)$display$(' ' * ($pad - $left))" -NoNewline -ForegroundColor $color
         Write-Host $v -ForegroundColor Cyan
     }
-    $title = 'LazyAzure  -  azure-setup.ps1'
+    $title = 'LazyBicep  -  azure-setup.ps1'
     Write-Host ''
     Write-Host "  $([char]0x256D)$hLine$([char]0x256E)" -ForegroundColor Cyan
     Row ''
@@ -204,7 +204,7 @@ function Show-Author {
     Row 'A project''s Azure infrastructure from one map' -color 'White'
     Row 'set up, checked, changed and removed per environment' -color 'White'
     Row ''
-    Row "by Netmedia$(if ($kitVersion) { "  |  LazyAzure $kitVersion" })" -color 'DarkGray'
+    Row "by Netmedia$(if ($kitVersion) { "  |  LazyBicep $kitVersion" })" -color 'DarkGray'
     Row 'https://netmedia.agency  |  netmedia@netmedia.hr' -color 'DarkGray'
     Row ''
     Write-Host "  $([char]0x2570)$hLine$([char]0x256F)" -ForegroundColor Cyan
@@ -224,7 +224,7 @@ function Show-Usage {
     }
     & $b 'USAGE'
     & $g '  .\infra\azure-setup.ps1  [mode]  [-Environment <env>]  [options]'
-    & $g '  .\infra\lazyazure.ps1                         # the same in a terminal UI'
+    & $g '  .\infra\lazybicep.ps1                         # the same in a terminal UI'
     & $d '  Run from the repository root. Without a mode: this guide, then a menu.'
     Write-Host ''
     & $b 'ENVIRONMENT MODES  (Azure; every change asked first)'
@@ -298,7 +298,7 @@ function Show-Usage {
     & $d '  Azure CLI (az login), Owner on the subscription (or Contributor + User Access'
     & $d '  Administrator), the right to create app registrations; GitHub CLI (gh auth login)'
     & $d '  as an admin of the repository. Windows PowerShell 5.1 or PowerShell 7.'
-    & $d '  Everything else: infra/LAZYAZURE.md'
+    & $d '  Everything else: infra/LAZYBICEP.md'
     Write-Host $hr -ForegroundColor Cyan
     Write-Host ''
 }
@@ -345,7 +345,7 @@ $script:secrets = @{}
 
 # --- output and questions -------------------------------------------------------------------------
 
-# With -Ui every line is an event for infra/lazyazure.ps1.
+# With -Ui every line is an event for infra/lazybicep.ps1.
 function Send($Event) { [Console]::Out.WriteLine('@@ui ' + (ConvertTo-Json -InputObject $Event -Depth 10 -Compress)) }
 function Say([string]$Text, [string]$Color) {
     if ($script:replaying) { return } # already on the screen (see Read-Answer)
@@ -419,7 +419,7 @@ function Read-Answer([string]$Prompt, $Meta) {
         if ($null -eq $line) { throw 'The input ended before every question was answered.' }
         if ([Console]::IsInputRedirected -and -not $script:ui) { Write-Host $line }
         $line = $line.Trim()
-        # Asked again after '<': Enter keeps what was answered before (lazyazure fills it in instead).
+        # Asked again after '<': Enter keeps what was answered before (lazybicep fills it in instead).
         if (-not $line -and -not $script:ui -and $script:previous -and $script:previous.Prompt -eq $Prompt -and $script:previous.Answer) { $line = [string]$script:previous.Answer }
         if ($line -eq '<') {
             if (-not $script:canGoBack) { Note "X '<' goes back only while answering, before the first change"; continue }
@@ -1990,7 +1990,7 @@ function New-BaseMap([string]$Name, [string]$Description, [string]$Region, [stri
     $rg = Get-Filled (Get-Blueprint 'resourceGroup').entry (New-Placeholders 'resourceGroup' 'Resource group') @{}
     $deploy = Get-Filled (Get-Blueprint 'entraDeployApp').entry (New-Placeholders 'deployApp' 'App registration (Entra)') @{}
     return [pscustomobject][ordered]@{
-        '$comment'  = "The map of this infrastructure (infra/README.md, 'The map'): every resource of one environment, and how it is named, asked, deployed, sized, priced, connected, checked and removed. infra/azure-setup.ps1 runs from it (-AddResource / -RemoveResource change it), infra/lazyazure.ps1 shows it, infra/generate.ps1 makes infra/main.bicep from it (never edit that)."
+        '$comment'  = "The map of this infrastructure (infra/README.md, 'The map'): every resource of one environment, and how it is named, asked, deployed, sized, priced, connected, checked and removed. infra/azure-setup.ps1 runs from it (-AddResource / -RemoveResource change it), infra/lazybicep.ps1 shows it, infra/generate.ps1 makes infra/main.bicep from it (never edit that)."
         project     = [pscustomobject][ordered]@{ name = $Name; description = $Description; setup = 'azure-setup.ps1'; template = 'main.bicep'; managedByTag = 'infra/main.bicep'; deploymentName = $Deployment; subscriptionMatch = '' }
         regions     = [pscustomobject][ordered]@{ default = $Region; staticWebApp = @('westeurope', 'eastus2', 'centralus', 'westus2', 'eastasia') }
         providers   = @()
@@ -2082,7 +2082,7 @@ function Invoke-Init {
     Save-Map
     Head 'Next steps'
     Note 'A dry run asks the names of every resource for an environment and shows what would be created:'
-    Note '  .\infra\azure-setup.ps1 -DryRun     (or .\infra\lazyazure.ps1)'
+    Note '  .\infra\azure-setup.ps1 -DryRun     (or .\infra\lazybicep.ps1)'
     Note 'then a start creates it, the GitHub trust and the GitHub environment. Commit infra/.'
     $vars = @($map.github.variables.PSObject.Properties | Where-Object { $_.Name -notlike 'AZURE_*_ID' } | ForEach-Object { $_.Name })
     if ($vars.Count) { Note "The apps' deploy workflows use the GitHub environment's variables ($($vars -join ', '), AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID); add them to infra.map.json's github.workflows to have them named in the next steps." }
@@ -3004,7 +3004,7 @@ $code = 1
 try {
     if (-not $script:ui) { Show-Author }
     $script:mode = Select-Mode
-    if (-not $map -and @('init', 'quit') -notcontains $script:mode) { throw 'There is no infra/infra.map.json yet: start the project with .\infra\azure-setup.ps1 -Init (or .\infra\lazyazure.ps1).' }
+    if (-not $map -and @('init', 'quit') -notcontains $script:mode) { throw 'There is no infra/infra.map.json yet: start the project with .\infra\azure-setup.ps1 -Init (or .\infra\lazybicep.ps1).' }
     if ($script:mode -eq 'quit') { $code = 0 }
     elseif ($script:mode -eq 'remove') { $code = Invoke-Remove }
     else {

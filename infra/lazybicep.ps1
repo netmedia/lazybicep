@@ -1,18 +1,18 @@
 ﻿#Requires -Version 5.1
 
 #  ╔══════════════════════════════════════════════════════════════════════════╗
-#  ║   LazyAzure  -  lazyazure.ps1                                            ║
+#  ║   LazyBicep  -  lazybicep.ps1                                            ║
 #  ║   The terminal UI of a project's Azure infrastructure                    ║
 #  ║                                                                          ║
 #  ║   Author  : Netmedia                                                     ║
 #  ║   Web     : https://netmedia.agency                                      ║
 #  ║   Email   : netmedia@netmedia.hr                                         ║
-#  ║   Product : LazyAzure  -  https://github.com/netmedia/lazyazure          ║
+#  ║   Product : LazyBicep  -  https://github.com/netmedia/lazybicep          ║
 #  ╚══════════════════════════════════════════════════════════════════════════╝
 
 <#
 .SYNOPSIS
-LazyAzure by Netmedia: the terminal UI of a project's Azure infrastructure (infra/infra.map.json,
+LazyBicep by Netmedia: the terminal UI of a project's Azure infrastructure (infra/infra.map.json,
 infra/azure-setup.ps1).
 
 .AUTHOR
@@ -62,17 +62,17 @@ Testing: the screen's height (default 36).
 Testing: another setup script to run instead of the map's (project.setup).
 
 .EXAMPLE
-.\infra\lazyazure.ps1
+.\infra\lazybicep.ps1
 
 .EXAMPLE
-.\infra\lazyazure.ps1 -Environment test
+.\infra\lazybicep.ps1 -Environment test
 
 .NOTES
-LazyAzure is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
-https://github.com/netmedia/lazyazure.
+LazyBicep is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
+https://github.com/netmedia/lazybicep.
 
 .LINK
-infra/LAZYAZURE.md
+infra/LAZYBICEP.md
 #>
 [CmdletBinding()]
 param(
@@ -106,14 +106,14 @@ function Show-Author {
         Write-Host "$(' ' * $left)$display$(' ' * ($pad - $left))" -NoNewline -ForegroundColor $color
         Write-Host $v -ForegroundColor Cyan
     }
-    $title = 'LazyAzure  -  lazyazure.ps1'
+    $title = 'LazyBicep  -  lazybicep.ps1'
     Write-Host ''
     Write-Host "  $([char]0x256D)$hLine$([char]0x256E)" -ForegroundColor Cyan
     Row ''
     Row "$E[1m$title$E[0m" $title 'Cyan'
     Row 'The terminal UI of a project''s Azure infrastructure' -color 'White'
     Row ''
-    Row "by Netmedia$(if ($kitVersion) { "  |  LazyAzure $kitVersion" })" -color 'DarkGray'
+    Row "by Netmedia$(if ($kitVersion) { "  |  LazyBicep $kitVersion" })" -color 'DarkGray'
     Row 'https://netmedia.agency  |  netmedia@netmedia.hr' -color 'DarkGray'
     Row ''
     Write-Host "  $([char]0x2570)$hLine$([char]0x256F)" -ForegroundColor Cyan
@@ -127,10 +127,10 @@ function Show-Usage {
     $g = { param($t) Write-Host "  $t" -ForegroundColor Green }
     $y = { param($t) Write-Host "  $t" -ForegroundColor Yellow }
     & $b 'USAGE'
-    & $g '  .\infra\lazyazure.ps1  [-Environment <env>]'
+    & $g '  .\infra\lazybicep.ps1  [-Environment <env>]'
     & $d '  Run from the repository root, in Windows Terminal (or the Windows console),'
     & $d '  at least 70 x 20. The work is done by infra\azure-setup.ps1 (same questions,'
-    & $d '  same results); lazyazure shows it in one screen.'
+    & $d '  same results); lazybicep shows it in one screen.'
     Write-Host ''
     & $b 'SCREENS'
     & $y '  Home'
@@ -170,14 +170,14 @@ function Show-Usage {
     Write-Host ''
     & $b 'EXAMPLES'
     & $g '  # Look around (Home, then m for the map)'
-    & $g '  .\infra\lazyazure.ps1'
+    & $g '  .\infra\lazybicep.ps1'
     Write-Host ''
     & $g '  # Start on the test environment'
-    & $g '  .\infra\lazyazure.ps1 -Environment test'
+    & $g '  .\infra\lazybicep.ps1 -Environment test'
     Write-Host ''
     & $b 'MORE'
     & $d '  .\infra\azure-setup.ps1 -Help   every mode and option of the setup'
-    & $d '  infra\LAZYAZURE.md              the map, the catalog, naming, workflows'
+    & $d '  infra\LAZYBICEP.md              the map, the catalog, naming, workflows'
     Write-Host $hr -ForegroundColor Cyan
     Write-Host ''
 }
@@ -601,7 +601,7 @@ function Get-StepStates {
 # --- drawing -------------------------------------------------------------------------------------------
 
 function Border-Top([int]$W, [string]$Left, [string]$Right, [int]$Split) {
-    $segs = @((S $g.tl $st.border), (S $g.h $st.border), (S ' lazyazure ' $st.brand), (S " $Left " $st.title))
+    $segs = @((S $g.tl $st.border), (S $g.h $st.border), (S ' lazybicep ' $st.brand), (S " $Left " $st.title))
     $used = 2 + 11 + $Left.Length + 2
     $rightText = " $Right "
     $fill = $W - $used - $rightText.Length - 2
@@ -771,7 +771,7 @@ function Draw-Home([int]$W, [int]$H) {
     # Whose it is, and where help is: at the bottom of the column (links open in the browser).
     $bar = S " $($g.bar) " $st.brandBar
     $brand = @(
-        @($bar, (S 'LazyAzure ' $st.brandName), (S $kitVersion $st.faint)),
+        @($bar, (S 'LazyBicep ' $st.brandName), (S $kitVersion $st.faint)),
         @($bar, (S 'by ' $st.faint), (S 'Netmedia' $st.netmedia 'https://netmedia.agency')),
         @($bar, (S 'https://netmedia.agency' $st.brandLink 'https://netmedia.agency')),
         @($bar, (S '? ' $st.key), (S 'help and keys' $st.muted)))
@@ -1129,7 +1129,7 @@ function Draw([int]$W, [int]$H) {
     if ($W -lt 70 -or $H -lt 20) {
         $rows = @()
         for ($i = 0; $i -lt $H; $i++) { $rows += , @(S '') }
-        $rows[0] = Fit @(S "lazyazure needs a window of at least 70 x 20 (now $W x $H)." $st.warn) $W
+        $rows[0] = Fit @(S "lazybicep needs a window of at least 70 x 20 (now $W x $H)." $st.warn) $W
         return , $rows
     }
     switch ($script:screen) {
@@ -1147,10 +1147,10 @@ function Draw-Help([int]$W, [int]$H) {
     $lines = New-Object Collections.ArrayList
     $add = { param($segs) [void]$lines.Add($segs) }
     [void]$lines.Add(@())
-    [void]$lines.Add(@((S ' '), (S $g.bar $st.brandBar), (S 'LazyAzure ' $st.brandName), (S "$kitVersion  " $st.faint), (S 'by ' $st.faint), (S 'Netmedia' $st.netmedia 'https://netmedia.agency')))
-    [void]$lines.Add(@((S ' '), (S $g.bar $st.brandBar), (S 'https://netmedia.agency' $st.brandLink 'https://netmedia.agency'), (S '  |  ' $st.faint), (S 'netmedia@netmedia.hr' $st.brandLink 'mailto:netmedia@netmedia.hr'), (S '  |  ' $st.faint), (S 'https://github.com/netmedia/lazyazure' $st.brandLink 'https://github.com/netmedia/lazyazure')))
+    [void]$lines.Add(@((S ' '), (S $g.bar $st.brandBar), (S 'LazyBicep ' $st.brandName), (S "$kitVersion  " $st.faint), (S 'by ' $st.faint), (S 'Netmedia' $st.netmedia 'https://netmedia.agency')))
+    [void]$lines.Add(@((S ' '), (S $g.bar $st.brandBar), (S 'https://netmedia.agency' $st.brandLink 'https://netmedia.agency'), (S '  |  ' $st.faint), (S 'netmedia@netmedia.hr' $st.brandLink 'mailto:netmedia@netmedia.hr'), (S '  |  ' $st.faint), (S 'https://github.com/netmedia/lazybicep' $st.brandLink 'https://github.com/netmedia/lazybicep')))
     [void]$lines.Add(@())
-    foreach ($l in (Wrap 'A project''s Azure infrastructure from one map (infra/infra.map.json): set up, checked, changed and removed environment by environment. lazyazure shows it; infra/azure-setup.ps1 does the work (the same questions and results without the UI); main.bicep is generated from the map.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
+    foreach ($l in (Wrap 'A project''s Azure infrastructure from one map (infra/infra.map.json): set up, checked, changed and removed environment by environment. lazybicep shows it; infra/azure-setup.ps1 does the work (the same questions and results without the UI); main.bicep is generated from the map.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
     [void]$lines.Add(@())
     $section = {
         param([string]$Title, $Rows)
@@ -1181,7 +1181,7 @@ function Draw-Help([int]$W, [int]$H) {
         @('a', '.\infra\azure-setup.ps1 -AddResource [-Kind sqlDatabase]'),
         @('x', '.\infra\azure-setup.ps1 -RemoveResource -Key <key>'),
         @('new project', '.\infra\azure-setup.ps1 -Init [-SpecFile spec.json]'),
-        @('everything', '.\infra\azure-setup.ps1 -Help   and   infra\LAZYAZURE.md'))
+        @('everything', '.\infra\azure-setup.ps1 -Help   and   infra\LAZYBICEP.md'))
     $bodyRows = $H - 2
     $max = [Math]::Max(0, $lines.Count - $bodyRows)
     if ($script:helpScroll -gt $max) { $script:helpScroll = $max }
@@ -1396,14 +1396,14 @@ function Save-Frame([string]$Why) {
 function Enable-Ansi {
     if ($PSVersionTable.PSEdition -eq 'Core' -or $env:OS -ne 'Windows_NT') { return }
     try {
-        Add-Type -Namespace LazyAzure -Name Console -MemberDefinition @'
+        Add-Type -Namespace LazyBicep -Name Console -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
 [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
 [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
 '@
-        $h = [LazyAzure.Console]::GetStdHandle(-11)
+        $h = [LazyBicep.Console]::GetStdHandle(-11)
         $m = 0
-        if ([LazyAzure.Console]::GetConsoleMode($h, [ref]$m)) { [void][LazyAzure.Console]::SetConsoleMode($h, $m -bor 4) }
+        if ([LazyBicep.Console]::GetConsoleMode($h, [ref]$m)) { [void][LazyBicep.Console]::SetConsoleMode($h, $m -bor 4) }
     } catch { }
 }
 
@@ -1468,10 +1468,10 @@ try {
         [Console]::Out.Write("$E[0m$E[?25h$E[?1049l")
     }
 }
-if ($err) { Write-Host "lazyazure: $($err.Exception.Message)" -ForegroundColor Red; Write-Host $err.ScriptStackTrace -ForegroundColor DarkGray }
+if ($err) { Write-Host "lazybicep: $($err.Exception.Message)" -ForegroundColor Red; Write-Host $err.ScriptStackTrace -ForegroundColor DarkGray }
 if (-not $harness) {
     Show-Author
-    Write-Host '  .\infra\lazyazure.ps1 -Help: screens, keys and commands   |   infra\LAZYAZURE.md: everything else' -ForegroundColor DarkGray
+    Write-Host '  .\infra\lazybicep.ps1 -Help: screens, keys and commands   |   infra\LAZYBICEP.md: everything else' -ForegroundColor DarkGray
     Write-Host ''
 }
 exit $code

@@ -1,35 +1,37 @@
 ﻿#Requires -Version 5.1
 
 #  ╔══════════════════════════════════════════════════════════════════════════╗
-#  ║   LazyAzure  -  initintoproject.ps1                                      ║
+#  ║   LazyBicep  -  initintoproject.ps1                                      ║
 #  ║   Puts the kit into a project's infra folder, or updates it              ║
 #  ║                                                                          ║
 #  ║   Author  : Netmedia                                                     ║
 #  ║   Web     : https://netmedia.agency                                      ║
 #  ║   Email   : netmedia@netmedia.hr                                         ║
-#  ║   Product : LazyAzure  -  https://github.com/netmedia/lazyazure          ║
+#  ║   Product : LazyBicep  -  https://github.com/netmedia/lazybicep          ║
 #  ╚══════════════════════════════════════════════════════════════════════════╝
 
 <#
 .SYNOPSIS
-    Puts LazyAzure into a project's infra folder (an empty instance), or updates the kit's files there.
+    Puts LazyBicep into a project's infra folder (an empty instance), or updates the kit's files there.
 
 .AUTHOR
     Netmedia  |  https://netmedia.agency  |  netmedia@netmedia.hr
 
 .DESCRIPTION
-    LazyAzure keeps a project's Azure infrastructure in one map (infra\infra.map.json) and sets it up,
+    LazyBicep keeps a project's Azure infrastructure in one map (infra\infra.map.json) and sets it up,
     checks it, changes it and removes it environment by environment, with a terminal UI.
 
     New project:
       Copies the kit (infra\ of this repository: the files kit.json lists) and the starting
-      naming.json into the target. Then, from the project's root, .\infra\lazyazure.ps1 (n: new
+      naming.json into the target. Then, from the project's root, .\infra\lazybicep.ps1 (n: new
       project) or .\infra\azure-setup.ps1 -Init starts the project's map.
 
     Update (-Update):
-      Replaces the kit's files in a project that has LazyAzure. The project's own files are never
+      Replaces the kit's files in a project that has LazyBicep. The project's own files are never
       touched (infra.map.json, naming.json, environments\, README.md); a project's own extra catalog
       kinds stay. Then it checks whether main.bicep is still what the map makes.
+      A project from when the kit was LazyAzure loses lazyazure.ps1, lazyazure.exe and LAZYAZURE.md
+      (and the root's lazyazure.exe): lazybicep.* replaces them.
 
 .PARAMETER Target
     (Required) The project's infra folder, e.g. D:\Development\Netmedia\MyProject\infra.
@@ -37,7 +39,7 @@
     asks: create <Target>\infra there (Yes), or put the kit right into <Target> (No).
 
 .PARAMETER Update
-    Update the kit's files of a project that has LazyAzure.
+    Update the kit's files of a project that has LazyBicep.
 
 .PARAMETER DryRun
     Show what would be copied, change nothing.
@@ -54,8 +56,8 @@
     .\initintoproject.ps1 D:\Development\Netmedia\MyProject\infra -Update
 
 .NOTES
-    LazyAzure is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
-    https://github.com/netmedia/lazyazure. Documentation: infra\LAZYAZURE.md.
+    LazyBicep is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
+    https://github.com/netmedia/lazybicep. Documentation: infra\LAZYBICEP.md.
 #>
 [CmdletBinding()]
 param(
@@ -100,7 +102,7 @@ function Show-Author {
         Write-Host "$(' ' * $left)$display$(' ' * ($pad - $left))" -NoNewline -ForegroundColor $color
         Write-Host $v -ForegroundColor Cyan
     }
-    $title = 'LazyAzure  -  initintoproject.ps1'
+    $title = 'LazyBicep  -  initintoproject.ps1'
     Write-Host ''
     Write-Host "  $([char]0x256D)$hLine$([char]0x256E)" -ForegroundColor Cyan
     Row ''
@@ -108,7 +110,7 @@ function Show-Author {
     Row 'A project''s Azure infrastructure from one map' -color 'White'
     Row 'puts the kit into a project, or updates it there' -color 'White'
     Row ''
-    Row "by Netmedia  |  LazyAzure $($manifest.version)" -color 'DarkGray'
+    Row "by Netmedia  |  LazyBicep $($manifest.version)" -color 'DarkGray'
     Row 'https://netmedia.agency  |  netmedia@netmedia.hr' -color 'DarkGray'
     Row ''
     Write-Host "  $([char]0x2570)$hLine$([char]0x256F)" -ForegroundColor Cyan
@@ -132,7 +134,7 @@ function Show-Usage {
     Write-Host ''
     & $b 'OPTIONS'
     & $y '  -Update'
-    & $d '    The project has LazyAzure: replace the kit''s files (kit.json lists them), keep'
+    & $d '    The project has LazyBicep: replace the kit''s files (kit.json lists them), keep'
     & $d '    the project''s (infra.map.json, naming.json, environments\, README.md).'
     & $y '  -DryRun'
     & $d '    Show what would be copied; change nothing.'
@@ -147,14 +149,14 @@ function Show-Usage {
     & $g '  .\initintoproject.ps1  D:\Development\Netmedia\MyProject\infra  -Update'
     Write-Host ''
     & $b 'THEN, FROM THE PROJECT''S ROOT'
-    & $d '  1. .\lazyazure.exe   (or .\infra\lazyazure.ps1)    n: a new project (name, prefix,'
+    & $d '  1. .\lazybicep.exe   (or .\infra\lazybicep.ps1)    n: a new project (name, prefix,'
     & $d '                                                 then its resources from the catalog)'
     & $d '     or .\infra\azure-setup.ps1 -Init -SpecFile spec.json   (examples\spec.example.json)'
     & $d '  2. .\infra\azure-setup.ps1 -DryRun -Environment test   what would be created'
     & $d '  3. .\infra\azure-setup.ps1 -Start  -Environment test   creates it'
     & $d '  4. commit infra\ (the map, naming.json, main.bicep, environments\)'
     Write-Host ''
-    & $d '  Everything about it: infra\LAZYAZURE.md'
+    & $d '  Everything about it: infra\LAZYBICEP.md'
     Write-Host $hr -ForegroundColor Cyan
     Write-Host ''
 }
@@ -177,25 +179,25 @@ $infraNames = @('infra', 'infrastructure', 'iac', 'azure', 'bicep', 'deploy')
 if (-not (Test-Path (Join-Path $Target 'azure-setup.ps1')) -and $infraNames -notcontains (Split-Path $Target -Leaf).ToLowerInvariant()) {
     $sub = Join-Path $Target 'infra'
     Write-Warn "$Target doesn't look like an infra folder."
-    Write-Host "    Yes: create $sub and put LazyAzure there (lazyazure.exe goes into $Target)" -ForegroundColor DarkGray
+    Write-Host "    Yes: create $sub and put LazyBicep there (lazybicep.exe goes into $Target)" -ForegroundColor DarkGray
     Write-Host "    No:  put it right into $Target" -ForegroundColor DarkGray
     $answer = Read-Host '  Create the infra folder? [Y/n]'
     if ($null -eq $answer) { $answer = '' }
     if ($answer.Trim() -notmatch '^(n|no)$') { $Target = $sub }
 }
 $has =Test-Path (Join-Path $Target 'azure-setup.ps1')
-if ($has -and -not $Update) { Write-Err "$Target has LazyAzure already: -Update replaces the kit's files there."; exit 1 }
-if (-not $has -and $Update) { Write-Err "$Target has no LazyAzure to update: leave -Update out to put it there."; exit 1 }
+if ($has -and -not $Update) { Write-Err "$Target has LazyBicep already: -Update replaces the kit's files there."; exit 1 }
+if (-not $has -and $Update) { Write-Err "$Target has no LazyBicep to update: leave -Update out to put it there."; exit 1 }
 if ($DryRun) { Write-Host "`n  == DRY RUN - nothing is copied ==" -ForegroundColor Cyan }
 
 $mode = 'new project'
 if ($Update) { $mode = 'update' }
-Write-Banner "[1/2] LazyAzure $($manifest.version) -> $mode"
+Write-Banner "[1/2] LazyBicep $($manifest.version) -> $mode"
 Write-Info "kit:    $kit"
 Write-Info "target: $Target"
 $before = $null
 if ($Update -and (Test-Path (Join-Path $Target 'kit.json'))) { $before = (Get-Content (Join-Path $Target 'kit.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version }
-if ($before) { Write-Info "the project has LazyAzure $before" }
+if ($before) { Write-Info "the project has LazyBicep $before" }
 Write-Host ''
 if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $Target | Out-Null }
 foreach ($f in @($manifest.files)) {
@@ -216,8 +218,16 @@ if (-not $Update) {
     }
 } else {
     foreach ($p in @($manifest.projectFiles)) { if (Test-Path (Join-Path $Target $p)) { Write-Skip "kept: $p (the project's)" } }
+    # The kit was LazyAzure before: its files under the old name go (lazybicep.* replaces them).
+    $legacy = @('lazyazure.ps1', 'lazyazure.exe', 'LAZYAZURE.md' | ForEach-Object { Join-Path $Target $_ }) + @(Join-Path (Split-Path $Target -Parent) 'lazyazure.exe')
+    foreach ($old in $legacy) {
+        if (-not (Test-Path $old -PathType Leaf)) { continue }
+        if ($DryRun) { Write-Skip "would remove $old (the kit's old name)"; continue }
+        try { Remove-Item $old -Force; Write-OK "removed $old (the kit's old name)" }
+        catch { Write-Warn "$old`: $($_.Exception.Message) (is it running? close it and run this again)" }
+    }
 }
-# lazyazure.exe in the project's root as well: it starts infra\lazyazure.ps1, so lazyazure runs from there.
+# lazybicep.exe in the project's root as well: it starts infra\lazybicep.ps1, so lazybicep runs from there.
 $projectRoot = Split-Path $Target -Parent
 foreach ($f in @($manifest.rootFiles)) {
     if (-not $f) { continue }
@@ -231,16 +241,16 @@ foreach ($f in @($manifest.rootFiles)) {
 Write-Banner '[2/2] Next'
 if ($DryRun) { Write-Info 'Run it again without -DryRun to copy.'; exit 0 }
 if (-not $Update) {
-    Write-OK "LazyAzure $($manifest.version) is in $Target."
+    Write-OK "LazyBicep $($manifest.version) is in $Target."
     Write-Host ''
     Write-Host '  From the project''s root:' -ForegroundColor White
-    Write-Host '    .\lazyazure.exe                                 n: a new project (also .\infra\lazyazure.exe)' -ForegroundColor Green
+    Write-Host '    .\lazybicep.exe                                 n: a new project (also .\infra\lazybicep.exe)' -ForegroundColor Green
     Write-Host '    .\infra\azure-setup.ps1 -Init [-SpecFile spec.json]' -ForegroundColor Green
     Write-Host '    .\infra\azure-setup.ps1 -Help                   every mode and option' -ForegroundColor Green
     Write-Host ''
     exit 0
 }
-Write-OK "LazyAzure $before -> $($manifest.version) in $Target."
+Write-OK "LazyBicep $before -> $($manifest.version) in $Target."
 if (Test-Path (Join-Path $Target 'infra.map.json')) {
     & (Join-Path $Target 'generate.ps1') -Check -Quiet
     if ($LASTEXITCODE -eq 0) { Write-OK 'main.bicep is still what the map makes.' }
