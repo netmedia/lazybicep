@@ -1,5 +1,5 @@
 {
-  "$comment": "Azure naming rules (LAZYAZURE.md, 'Naming'). infra/azure-setup.ps1 builds every default name from these; change them here. The project's file: a kit update never replaces it.",
+  "$comment": "Azure naming rules (LAZYBICEP.md, 'Naming'). infra/azure-setup.ps1 builds every default name from these; change them here. The project's file: a kit update never replaces it.",
   "pattern": "{prefix}-{sub}-{type}-{env}",
   "insightsPattern": "{prefix}-{sub}-{type}-{env}-insights",
   "sharedInsightsPattern": "{prefix}-{sub}-{env}-insights",

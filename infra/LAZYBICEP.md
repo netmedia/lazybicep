@@ -1,7 +1,7 @@
-# LazyAzure
+# LazyBicep
 
 **A Netmedia product**: made and maintained by [Netmedia](https://netmedia.agency)
-(netmedia@netmedia.hr), https://github.com/netmedia/lazyazure.
+(netmedia@netmedia.hr), https://github.com/netmedia/lazybicep.
 
 The Azure infrastructure of a project, described by one map and set up, checked, changed and removed
 environment by environment, with a terminal UI. Windows PowerShell 5.1 or PowerShell 7, the Azure CLI,
@@ -9,15 +9,15 @@ the GitHub CLI; no modules. This file belongs to the kit (`kit.json`); a kit upd
 project notes go into the project's own `README.md`.
 
 **Every script explains itself**: `-Help` (or `-h`) shows its guide, modes, options and examples;
-in lazyazure, `?` shows the keys of every screen.
+in lazybicep, `?` shows the keys of every screen.
 
-lazyazure also comes as `lazyazure.exe`, in `infra\` and in the project's root: it starts
-`infra\lazyazure.ps1` with the same arguments, in the same console (the `.ps1` is the program). From the
-project's root: `.\lazyazure.exe` in PowerShell (it never runs a program from the current folder by its
-name alone), `lazyazure` in cmd, or a double-click in Explorer.
+lazybicep also comes as `lazybicep.exe`, in `infra\` and in the project's root: it starts
+`infra\lazybicep.ps1` with the same arguments, in the same console (the `.ps1` is the program). From the
+project's root: `.\lazybicep.exe` in PowerShell (it never runs a program from the current folder by its
+name alone), `lazybicep` in cmd, or a double-click in Explorer.
 
 ```
-.\infra\lazyazure.ps1 -h          .\infra\azure-setup.ps1 -h          .\infra\generate.ps1 -h
+.\infra\lazybicep.ps1 -h          .\infra\azure-setup.ps1 -h          .\infra\generate.ps1 -h
 ```
 
 | Path | What | Whose |
@@ -27,7 +27,7 @@ name alone), `lazyazure` in cmd, or a double-click in Explorer.
 | `environments/<env>.json` | The answers of each environment (commit them; the workflows read them) | the project |
 | `main.bicep` | Every Azure resource of an environment: **generated** from the map, never edited | generated |
 | `azure-setup.ps1` | The setup: asks, checks, creates, removes (every change asked first); adds and removes resources of the map; starts a new project | kit |
-| `lazyazure.ps1` | The terminal UI of the setup | kit |
+| `lazybicep.ps1` | The terminal UI of the setup | kit |
 | `generate.ps1` | Makes `main.bicep` from the map and the catalog | kit |
 | `catalog/` | The kinds of resources: `<kind>.bicep` (its part of `main.bicep`), `<kind>.json` (what adding it writes into the map), `roles.json` | kit |
 | `modules/` | Bicep modules the catalog uses (a Key Vault's secrets and roles, a database in its server's group) | kit |
@@ -36,11 +36,11 @@ name alone), `lazyazure` in cmd, or a double-click in Explorer.
 
 ## A new project
 
-Drop the empty instance into the project (`initintoproject.ps1 <project>\infra` from the LazyAzure
+Drop the empty instance into the project (`initintoproject.ps1 <project>\infra` from the LazyBicep
 repository), then:
 
 ```
-.\infra\lazyazure.ps1                         # New project: n
+.\infra\lazybicep.ps1                         # New project: n
 .\infra\azure-setup.ps1 -Init                 # the same without the UI
 .\infra\azure-setup.ps1 -Init -SpecFile spec.json
 ```
@@ -52,7 +52,7 @@ app what it uses. Then it writes the map and `naming.json` and generates `main.b
 changes yet: a dry run asks the names of an environment and shows what would be created, a start creates
 it.
 
-A **spec file** answers all of it (examples/spec.example.json in the LazyAzure repository):
+A **spec file** answers all of it (examples/spec.example.json in the LazyBicep repository):
 
 ```json
 {
@@ -78,7 +78,7 @@ Once per PC: the Azure CLI and the GitHub CLI, signed in with an account that is
 winget install Microsoft.AzureCLI GitHub.cli
 gh auth login
 az login                    # add --tenant <tenant> if the subscription is in another tenant
-.\infra\lazyazure.ps1       # or .\infra\azure-setup.ps1 (the help, then a menu)
+.\infra\lazybicep.ps1       # or .\infra\azure-setup.ps1 (the help, then a menu)
 ```
 
 | Choice | Switch | What it does |
@@ -103,7 +103,7 @@ A **new environment** can start from another one's answers (e.g. test from prod)
 Idempotent: a second run with the same answers changes nothing. `<` goes back to the previous question
 until the first change.
 
-## lazyazure
+## lazybicep
 
 The same setup in one screen. **Home**: the environments, the actions, the selected environment's
 resources with where each connects. **Map**: every resource in detail (role, naming, kind, Azure type, how
@@ -130,7 +130,7 @@ Each resource (in the order asked and saved) has:
 | `free`, `check` | Checks for a new name (`nameAvailable`, `vaultSoftDelete`) and for an existing resource (`linuxPlanInRegion`, `sameRegion`, `rbacVault`) |
 | `param`, `groupParam` | Its `main.bicep` parameters |
 | `size`, `choice`, `variants`, `when`, `optional`, `admin` | Answers asked with it, fields that depend on a choice, asked only for some answers, saved only when used |
-| `tag` | A short label shown with it in lazyazure and in the questions; without one it comes from the map: a choice per environment shows its options (`shared/separate`, or the environment's answer on Home), a `when` resource `only if separate` |
+| `tag` | A short label shown with it in lazybicep and in the questions; without one it comes from the map: a choice per environment shows its options (`shared/separate`, or the environment's answer on Home), a `when` resource `only if separate` |
 | `cost` | Its row in the cost estimate (`appServicePlan`, `staticWebApp`, `pennies`, `logs`, `table`) |
 | `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{secret.<name>}`, `{webDomain}`... |
 | `secrets`, `handSecrets` | Key Vault secrets the setup keeps (`by: setup`) or that are put in by hand |
@@ -163,7 +163,7 @@ get the same name.
 blueprint (`catalog/<kind>.json`: the map entry with `<placeholders>`, what it requires and creates, what
 the apps that use it get) and, only for new behaviour, a handler in `azure-setup.ps1` (a name check, a
 step) or `generate.ps1` (the fragment's values). Then `.\infra\generate.ps1`, a dry run, and a pull request
-to LazyAzure so every project gets it.
+to LazyBicep so every project gets it.
 
 ## Naming
 
@@ -244,11 +244,12 @@ A step is `{ comment, name, if, id, uses, with, workingDirectory, shell, run }`;
 
 ## Updating the kit
 
-From the LazyAzure repository: `.\initintoproject.ps1 <project>\infra -Update`. It replaces the kit's
+From the LazyBicep repository: `.\initintoproject.ps1 <project>\infra -Update`. It replaces the kit's
 files (`kit.json` lists them) and never touches the project's (`infra.map.json`, `naming.json`,
 `environments/`); then `.\infra\generate.ps1` shows whether `main.bicep` changes, and a dry run what that
-means in Azure.
+means in Azure. A project from when the kit was LazyAzure loses `lazyazure.ps1`, `lazyazure.exe` and
+`LAZYAZURE.md` (and the root's `lazyazure.exe`): `lazybicep.*` replaces them.
 
 ---
 
-LazyAzure is developed by **Netmedia**  |  https://netmedia.agency  |  netmedia@netmedia.hr
+LazyBicep is developed by **Netmedia**  |  https://netmedia.agency  |  netmedia@netmedia.hr

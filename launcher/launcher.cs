@@ -1,7 +1,7 @@
-// LazyAzure by Netmedia (https://netmedia.agency, netmedia@netmedia.hr).
+// LazyBicep by Netmedia (https://netmedia.agency, netmedia@netmedia.hr).
 //
-// The launcher behind lazyazure.exe and initintoproject.exe: it runs the PowerShell script of the same
-// name next to it (lazyazure.exe -> lazyazure.ps1) with every argument, in the same console, and returns
+// The launcher behind lazybicep.exe and initintoproject.exe: it runs the PowerShell script of the same
+// name next to it (lazybicep.exe -> lazybicep.ps1) with every argument, in the same console, and returns
 // its exit code. The .ps1 stays the program; the .exe only starts it (built by build-exe.ps1).
 //
 // C# 5 (the compiler that comes with Windows): C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
@@ -12,16 +12,16 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 
-[assembly: AssemblyTitle("LazyAzure")]
-[assembly: AssemblyDescription("LazyAzure by Netmedia: starts the PowerShell script of the same name next to it")]
+[assembly: AssemblyTitle("LazyBicep")]
+[assembly: AssemblyDescription("LazyBicep by Netmedia: starts the PowerShell script of the same name next to it")]
 [assembly: AssemblyCompany("Netmedia")]
-[assembly: AssemblyProduct("LazyAzure")]
+[assembly: AssemblyProduct("LazyBicep")]
 [assembly: AssemblyCopyright("Netmedia - https://netmedia.agency - netmedia@netmedia.hr")]
-[assembly: AssemblyVersion(LazyAzureLauncher.Version)]
-[assembly: AssemblyFileVersion(LazyAzureLauncher.Version)]
-[assembly: AssemblyInformationalVersion(LazyAzureLauncher.Version)]
+[assembly: AssemblyVersion(LazyBicepLauncher.Version)]
+[assembly: AssemblyFileVersion(LazyBicepLauncher.Version)]
+[assembly: AssemblyInformationalVersion(LazyBicepLauncher.Version)]
 
-static class LazyAzureLauncher
+static class LazyBicepLauncher
 {
     public const string Version = "0.1.0.0";
 
@@ -30,12 +30,12 @@ static class LazyAzureLauncher
         string exe = Assembly.GetExecutingAssembly().Location;
         string name = Path.GetFileNameWithoutExtension(exe) + ".ps1";
         string dir = Path.GetDirectoryName(exe);
-        // Next to it (infra\lazyazure.exe), or in infra\ below it (the project root's lazyazure.exe).
+        // Next to it (infra\lazybicep.exe), or in infra\ below it (the project root's lazybicep.exe).
         string script = Path.Combine(dir, name);
         if (!File.Exists(script)) { script = Path.Combine(Path.Combine(dir, "infra"), name); }
         if (!File.Exists(script))
         {
-            Console.Error.WriteLine("LazyAzure (Netmedia): " + name + " is missing next to " + Path.GetFileName(exe) + " and in infra\\ below it.");
+            Console.Error.WriteLine("LazyBicep (Netmedia): " + name + " is missing next to " + Path.GetFileName(exe) + " and in infra\\ below it.");
             Console.Error.WriteLine("The .exe only starts the .ps1 of the same name; keep them together.");
             return 1;
         }
@@ -48,7 +48,7 @@ static class LazyAzureLauncher
         start.UseShellExecute = false; // the same console: colours, keys, the terminal UI
         start.WorkingDirectory = Environment.CurrentDirectory;
 
-        // Ctrl+C is the script's to handle (lazyazure asks before it stops a run).
+        // Ctrl+C is the script's to handle (lazybicep asks before it stops a run).
         Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e) { e.Cancel = true; };
 
         try
@@ -61,7 +61,7 @@ static class LazyAzureLauncher
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine("LazyAzure (Netmedia): can't start PowerShell: " + e.Message);
+            Console.Error.WriteLine("LazyBicep (Netmedia): can't start PowerShell: " + e.Message);
             return 1;
         }
     }

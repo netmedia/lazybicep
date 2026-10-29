@@ -1,13 +1,13 @@
 ﻿#Requires -Version 5.1
 
 #  ╔══════════════════════════════════════════════════════════════════════════╗
-#  ║   LazyAzure  -  route.ps1                                                ║
+#  ║   LazyBicep  -  route.ps1                                                ║
 #  ║   Which environment a workflow run deploys to                            ║
 #  ║                                                                          ║
 #  ║   Author  : Netmedia                                                     ║
 #  ║   Web     : https://netmedia.agency                                      ║
 #  ║   Email   : netmedia@netmedia.hr                                         ║
-#  ║   Product : LazyAzure  -  https://github.com/netmedia/lazyazure          ║
+#  ║   Product : LazyBicep  -  https://github.com/netmedia/lazybicep          ║
 #  ╚══════════════════════════════════════════════════════════════════════════╝
 
 <#
