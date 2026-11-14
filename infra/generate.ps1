@@ -322,6 +322,18 @@ function Get-Section($Def) {
             $v.parent = $parent.key
             $v.parentTitle = $parent.title
         }
+        'frontDoor' {
+            $o = @(Get-Links $key 'origin') | Select-Object -First 1
+            $origin = $null
+            if ($o) { $origin = Get-Def $o.to }
+            if (-not $origin -or @('staticWebApp', 'appService', 'functionApp') -notcontains $origin.kind) { Fail "$key needs an origin connection to an app (a Static Web App, an App Service or a Function App)" }
+            $v.origin = $origin.key
+            $v.originTitle = $origin.title
+            $v.originHost = Get-TokenBicep "$($origin.key).host"
+            $v.probePath = '/'
+            if ($origin.healthCheckPath) { $v.probePath = [string]$origin.healthCheckPath }
+            $f.cache = $Def.cache -ne 'off'
+        }
         'logAnalytics' {
             $users = @(Get-LinksTo $key 'logs' | ForEach-Object { "$($_.from)New" })
             $v.needed = 'false'
@@ -459,6 +471,7 @@ function Get-Bicep {
             $out.Add("output $($d.key)HostName string = $($d.key).properties.defaultHostName")
             $out.Add("output $($d.key)VerificationId string = $($d.key).properties.customDomainVerificationId")
         } elseif ($d.kind -eq 'staticWebApp') { $out.Add("output $($d.key)HostName string = $($d.key).properties.defaultHostname") }
+        elseif ($d.kind -eq 'frontDoor') { $out.Add("output $($d.key)HostName string = $($d.key)Endpoint.properties.hostName") }
     }
     return (($out -join "`n") + "`n")
 }

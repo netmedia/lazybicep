@@ -30,6 +30,8 @@ name alone), `lazybicep` in cmd, or a double-click in Explorer.
 | `lazybicep.ps1` | The terminal UI of the setup | kit |
 | `generate.ps1` | Makes `main.bicep` from the map and the catalog | kit |
 | `analyze.ps1` | Looks through the solution and suggests a new project's resources (a spec) | kit |
+| `import.ps1` | Reads resource groups in Azure and suggests a new project's map from their resources (a spec with the real names) | kit |
+| `new-kinds.md` | Written by an import: a prompt per kind of resource the catalog doesn't have yet | the project |
 | `catalog/` | The kinds of resources: `<kind>.bicep` (its part of `main.bicep`), `<kind>.json` (what adding it writes into the map), `roles.json` | kit |
 | `modules/` | Bicep modules the catalog uses (a Key Vault's secrets and roles, a database in its server's group) | kit |
 | `route.ps1` | Which environment a workflow run deploys to (from the pushed branch) | kit |
@@ -44,10 +46,12 @@ repository), then:
 .\infra\lazybicep.ps1                         # New project: n
 .\infra\azure-setup.ps1 -Init                 # the same without the UI
 .\infra\azure-setup.ps1 -Init -Analyze        # analyze the solution without asking first
+.\infra\azure-setup.ps1 -Init -Import -ResourceGroup nm-erp-resgr-prod   # import from Azure
 .\infra\azure-setup.ps1 -Init -SpecFile spec.json
 ```
 
-It asks first: **analyze** the solution, or add the resources **by hand**. The analysis
+It asks first: **analyze** the solution, **import from Azure** (resource groups that exist already), or
+add the resources **by hand**. The analysis
 (`infra/analyze.ps1`; it reads files, runs nothing) looks through the project's folders, without build
 output, `node_modules` and `infra`:
 
@@ -76,6 +80,45 @@ Azure doesn't offer any more (the project targets an old .NET) is suggested as t
 a warning. After the suggestions, more resources can be added from the catalog as usual.
 `.\infra\analyze.ps1` shows what it would suggest without starting; `-Out spec.json` writes it as a spec
 file to edit and use with `-SpecFile`.
+
+### Importing from Azure
+
+The import (`infra/import.ps1`; Azure CLI, read only) asks the subscription, the resource groups (one or
+more) and the resources to put into the map (by default every one the catalog has a kind for), which
+environment they are, and with several groups the environment's own (the others' plans, SQL servers, Key
+Vaults, Application Insights and workspaces are shared from theirs). From each resource it reads:
+
+| Azure | Suggests |
+|---|---|
+| `Microsoft.Web/sites` | An App Service (runtime, health check, its plan) or a Function App (Flex Consumption or a plan, its runtime, its storage account) |
+| `Microsoft.Web/serverFarms` | An App Service plan (a Flex Consumption plan goes with its app) |
+| `Microsoft.Web/staticSites` | A Static Web App (its build's folders when GitHub made it) |
+| `Microsoft.Sql/servers` | The SQL server and every database on it but master |
+| `Microsoft.ServiceBus/namespaces` | A Service Bus with its queues (topics are reported: the catalog makes queues) |
+| `Microsoft.Storage/storageAccounts` | A storage account and its queues (read with your sign-in, never the keys) |
+| `Microsoft.KeyVault/vaults`, `Microsoft.Insights/components`, `Microsoft.OperationalInsights/workspaces` | Key Vault, Application Insights (with its workspace), Log Analytics |
+| `Microsoft.Cdn/profiles` (Front Door) | A Front Door in front of the app its origin is |
+
+What each app uses comes from its app settings and connection strings (matched by host names, Key Vault
+references, Application Insights' key; the values are never shown or kept) and from its managed
+identity's role assignments, which give its roles too.
+
+Then it asks: **connect** to these resources, or create **new** ones by the map's definitions.
+
+- **connect**: the map takes them over. After the map is written, `environments/<env>.json` gets their
+  real names (marked imported), so the environment's first dry run asks every question once with them as
+  the defaults and finds them; a start then adds what is missing, each change asked first: managed
+  identities, roles, the apps' settings, the kit's security (no keys, no FTP or basic auth), the GitHub
+  trust (OIDC), the GitHub environment and the deploy workflows.
+- **new**: the map gets the same resources, made new next to them by the naming rules, with managed
+  identities and without keys; move the data and remove the old ones by hand.
+
+A type the catalog has no kind for (a classic CDN profile, Redis, Cosmos DB, Container Apps, Service Bus
+topics...) is reported, and `infra/new-kinds.md` gets a prompt for each: what to build (the blueprint, the
+fragment, naming, the import's mapping, the docs) and the resource's properties without secrets. Paste it
+to Claude Code in the LazyBicep repository; once the kind is in the kit, `initintoproject.ps1 -Update`
+brings it and `-AddResource` adds the resource. `.\infra\import.ps1 -ResourceGroup <rg> [-List]` shows
+what an import would suggest without starting.
 
 Either way it asks the project's name, the prefix of its names (`client-project`, e.g. `nm-myerp`), the
 region and the name of the deployments. By hand, then its resources one by one from the catalog (after
@@ -183,6 +226,7 @@ Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `dep
 | `appServicePlan` | A Linux plan (new or shared) |
 | `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first) |
 | `serviceBus` | A namespace with queues, no keys; the apps get Data Sender and/or Receiver |
+| `frontDoor` | Azure Front Door Standard or Premium (the CDN) in front of an app of the map (Static Web App, App Service or Function App): one endpoint, HTTPS only, health probes on the app's health check, caching and compression if wanted. A custom domain on it and locking the app to Front Door are by hand for now |
 | `storageQueue` | A queue of a storage account; the apps get a queue role on that queue only |
 | `storage` | StorageV2 without keys; the apps get the data roles you pick |
 | `keyVault` | RBAC vault; the apps get Key Vault Secrets User |

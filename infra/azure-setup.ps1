@@ -123,6 +123,14 @@ whether to analyze the solution (infra/analyze.ps1 suggests the resources) or to
 With -Init: analyzes the solution without asking (infra/analyze.ps1). Each suggested resource is offered
 with what it was found from; the usual questions follow, with its answers as their defaults.
 
+.PARAMETER Import
+With -Init: imports from Azure without asking first (infra/import.ps1): the subscription, the resource
+groups and their resources are asked; each suggested resource is offered, and the real names become the
+environment's answers.
+
+.PARAMETER ResourceGroup
+With -Init -Import: the resource groups to import from (comma-separated); asked when left out.
+
 .PARAMETER SpecFile
 With -Init: a spec file with the project and its resources (infra/LAZYBICEP.md, "A new project"); no
 questions.
@@ -182,6 +190,8 @@ param(
     [string]$Key,
     [switch]$Init,
     [switch]$Analyze,
+    [switch]$Import,
+    [string[]]$ResourceGroup,
     [string]$SpecFile
 )
 
@@ -255,12 +265,13 @@ function Show-Usage {
     & $d '    Takes a resource out of the map with everything that refers to it; then'
     & $d '    offers to DELETE it from Azure (no by default; per environment its exact name'
     & $d '    typed, "delete prod" too for production; only what the setup made).'
-    & $y '  -Init  [-Analyze]  [-SpecFile <spec.json>]'
+    & $y '  -Init  [-Analyze | -Import [-ResourceGroup <rg>,...]]  [-SpecFile <spec.json>]'
     & $d '    Starts the map of a new project (an empty instance). Asks first: analyze the'
     & $d '    solution (infra/analyze.ps1 suggests the apps, databases, Service Bus, storage,'
-    & $d '    Key Vault, Application Insights; each offered, then the usual questions) or'
-    & $d '    add the resources by hand. -Analyze: analyze without asking. A spec file'
-    & $d '    answers all.'
+    & $d '    Key Vault, Application Insights), import from Azure (infra/import.ps1: pick'
+    & $d '    resource groups and resources; their real names become the environment''s'
+    & $d '    answers), or add the resources by hand. Each suggestion is offered, then the'
+    & $d '    usual questions. -Analyze / -Import: without asking. A spec file answers all.'
     Write-Host ''
     & $b 'OPTIONS'
     & $y '  -Environment <env>'
@@ -297,6 +308,9 @@ function Show-Usage {
     Write-Host ''
     & $g '  # A new project from an analysis of the solution (each suggestion offered)'
     & $g '  .\infra\azure-setup.ps1 -Init -Analyze'
+    Write-Host ''
+    & $g '  # A new project from what is in Azure already'
+    & $g '  .\infra\azure-setup.ps1 -Init -Import -ResourceGroup nm-erp-resgr-prod'
     Write-Host ''
     & $g '  # A new project from a spec file'
     & $g '  .\infra\azure-setup.ps1 -Init -SpecFile spec.json'
@@ -1660,15 +1674,25 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
         if ($c.connection.kind -eq 'host') { $ph['host'] = $sub; $ph['host.title'] = (Get-Def $sub).title }
     }
     foreach ($r in @($bp.requires | Where-Object { $_ -and (Test-Answers $_.when $answers) })) {
-        $have = @($map.resources | Where-Object { $_.kind -eq $r.kind } | ForEach-Object { $_.key })
+        # One kind, or one of several ("kinds", named by "as" in a spec: a Front Door's origin app).
+        $kinds = @($r.kind)
+        if ($r.kinds) { $kinds = @($r.kinds) }
+        $as = [string]$r.kind
+        if ($r.as) { $as = [string]$r.as }
+        $have = @($map.resources | Where-Object { $kinds -contains $_.kind } | ForEach-Object { $_.key })
         $question = Get-Filled $r.question $ph $answers
         $want = $null
-        if ($Spec -and $Spec.requires -and $Spec.requires.($r.kind)) { $want = [string]$Spec.requires.($r.kind) }
+        if ($Spec -and $Spec.requires -and $Spec.requires.$as) { $want = [string]$Spec.requires.$as }
         if ($have.Count) {
-            if (-not $want) { $want = $have[0] }
+            if (-not $want -or ($have -notcontains $want -and $want -ne 'new')) { $want = $have[0] }
             $chosen = Select-Option $question (@($have) + 'new') $want
         } else { Note "$question There is none in the map yet: a new one comes first."; $chosen = 'new' }
-        if ($chosen -eq 'new') { $chosen = Add-FromBlueprint $r.kind $null; Head "$($bp.title): $title" }
+        if ($chosen -eq 'new') {
+            $newKind = $kinds[0]
+            if ($kinds.Count -gt 1) { $newKind = Select-Option 'Which kind of new one' $kinds $kinds[0] }
+            $chosen = Add-FromBlueprint $newKind $null
+            Head "$($bp.title): $title"
+        }
         $links += , @($chosen, $r.connection)
         if ($r.field) { $ph[[string]$r.field] = $chosen }
         if ($r.connection.kind -eq 'host') { $ph['host'] = $chosen; $ph['host.title'] = (Get-Def $chosen).title }
@@ -1913,10 +1937,10 @@ function Invoke-RemoveResource {
     $def = Get-Def $k
     # What it is in or on (a database's server, a queue's storage account): needed to find it in Azure.
     $hostKey = [string](@($map.connections | Where-Object { $_.from -eq $k -and $_.kind -eq 'host' }) | Select-Object -First 1).to
-    $on = @($map.connections | Where-Object { $_.to -eq $k -and $_.kind -eq 'host' } | ForEach-Object { $_.from })
+    $on = @($map.connections | Where-Object { $_.to -eq $k -and @('host', 'origin') -contains $_.kind } | ForEach-Object { $_.from })
     $mirrors = @($map.resources | ForEach-Object { @($_.secrets) } | Where-Object { $_ -and $_.mirror -and $_.mirror.resource -eq $k })
     if ($on.Count -or $mirrors.Count) {
-        if ($on.Count) { Missing "$k can't go while $($on -join ', ') run on it or are in it: remove them first" }
+        if ($on.Count) { Missing "$k can't go while $($on -join ', ') run on it, are in it or are in front of it: remove them first" }
         if ($mirrors.Count) { Missing "$k keeps the secret $($mirrors[0].name) of a Key Vault (its mirror): change that in the map first" }
         if ($script:ui) { Send ([ordered]@{ t = 'summary'; env = ''; ghEnv = ''; open = @($script:results | Where-Object { -not $_.Done } | ForEach-Object { $_.Text }); code = 1 }) }
         return 1
@@ -2101,6 +2125,133 @@ function Add-Suggested($Analysis) {
         }
         $keyOf[[string]$r.key] = Add-FromBlueprint ([string]$r.kind) $null $spec
     }
+    $script:keyOf = $keyOf
+}
+
+# Importing from Azure (infra/import.ps1): the subscription, the resource groups, the resources (every one
+# the catalog has a kind for, by default), the environment they are and its own group. Read once per run
+# for the same answers ('<' starts the questions over). $null when it can't (no Azure CLI, not signed in).
+function Get-AzureImport {
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) { Note 'X the Azure CLI is not installed (winget install Microsoft.AzureCLI)'; return $null }
+    $account = Try-Az @('account', 'show')
+    if (-not $account) { Note 'X the Azure CLI is not signed in: az login, then start again'; return $null }
+    Note "signed in as $($account.user.name)"
+    $subs = @(Invoke-Az @('account', 'list') | Where-Object { $_.state -eq 'Enabled' })
+    $guess = 0
+    for ($i = 0; $i -lt $subs.Count; $i++) {
+        $mark = ''
+        if ($subs[$i].isDefault) { $mark = '  <- CLI default'; $guess = $i }
+        Note "$($i + 1). $($subs[$i].name) ($($subs[$i].id))$mark"
+    }
+    $n = 0
+    while (-not [int]::TryParse((Ask 'Subscription (number)' ([string]($guess + 1))), [ref]$n) -or $n -lt 1 -or $n -gt $subs.Count) { Note "X 1 to $($subs.Count)" }
+    $sub = $subs[$n - 1]
+    $groups = @(Invoke-Az @('group', 'list', '--subscription', $sub.id) | Where-Object { $_ } | ForEach-Object { [string]$_.name } | Sort-Object)
+    if (-not $groups.Count) { Note "X $($sub.name) has no resource groups"; return $null }
+    $picked = @($ResourceGroup | ForEach-Object { $_.Split(',') } | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $groups -contains $_ })
+    if (-not $picked.Count) {
+        if ($groups.Count -le 40) { Note "resource groups: $($groups -join ', ')" }
+        while (-not $picked.Count) {
+            $picked = @(Select-Many 'Resource groups to import from' $groups @())
+            if (-not $picked.Count) { Note 'X at least one' }
+        }
+    }
+    $listKey = "$($sub.id)|$($picked -join ',')"
+    if (-not $script:importList -or $script:importList.Key -ne $listKey) {
+        Note "reading $($picked -join ', ')"
+        $l = & (Join-Path $infra 'import.ps1') -Subscription $sub.id -ResourceGroup $picked -List -PassThru
+        $script:importList = [pscustomobject]@{ Key = $listKey; List = $l }
+    }
+    $items = @($script:importList.List.resources | Where-Object { $_.state -ne 'with' })
+    if (-not $items.Count) { Note 'X nothing to import there'; return $null }
+    # Labels: the names (with their group when two groups have the same name).
+    $label = @{}
+    foreach ($it in $items) {
+        $l = [string]$it.name
+        if (@($items | Where-Object { $_.name -eq $it.name }).Count -gt 1) { $l = "$($it.group)/$($it.name)" }
+        $label[$l] = $it
+        $what = 'no kind in the catalog (reported, with a prompt to add it)'
+        if ($it.state -eq 'kind') { $what = $it.kind }
+        Note ('{0,-48} {1}' -f $l, $what)
+    }
+    $options = @($label.Keys | Sort-Object)
+    $default = @($options | Where-Object { $label[$_].state -eq 'kind' })
+    $chosen = @(Select-Many 'Resources to put into the map' $options $default)
+    $ids = @($chosen | ForEach-Object { $label[$_].id })
+    $envs = @($naming.environments.PSObject.Properties | ForEach-Object { $_.Name })
+    $guessEnv = 'prod'
+    foreach ($e in $envs) { if (@($picked | Where-Object { $_ -match "(^|[-_])$e($|[-_])" }).Count) { $guessEnv = $e } }
+    $envName = Select-Option 'Which environment are they' $envs $guessEnv
+    # Connect: the map manages these resources (their names become the environment's answers; a start adds
+    # what is missing: managed identities, roles, the GitHub trust and deployments). New: the map's own,
+    # made by its definitions (the naming rules, managed identities) next to them.
+    Note "connect: the map takes these resources over; their names become the answers of $envName, and a start adds what is missing (managed identities, roles, the GitHub trust, environment and deploy workflows), each change asked first"
+    Note 'new: the map gets the same resources, made new by its definitions (the naming rules, managed identities, no keys) next to these; move the data and remove the old ones by hand'
+    $script:importMode = Select-Option "Connect to these resources, or create new ones by the map's definitions" @('connect', 'new') 'connect'
+    $main = $picked[0]
+    if ($picked.Count -gt 1) {
+        $most = @($chosen | ForEach-Object { $label[$_].group } | Group-Object | Sort-Object Count -Descending | ForEach-Object { $_.Name }) | Select-Object -First 1
+        if ($most) { $main = $most }
+        $main = Select-Option "The resource group of $envName (the others' resources are shared from them)" $picked $main
+    }
+    $importKey = "$listKey|$($ids -join ',')|$envName|$main"
+    if (-not $script:importData -or $script:importData.Key -ne $importKey) {
+        Note 'reading the resources (their settings, queues, databases, role assignments)'
+        $d = & (Join-Path $infra 'import.ps1') -Subscription $sub.id -ResourceGroup $picked -Ids $ids -Environment $envName -MainGroup $main -PassThru
+        $script:importData = [pscustomobject]@{ Key = $importKey; Data = $d }
+    }
+    $a = $script:importData.Data
+    foreach ($r in @($a.resources)) {
+        $line = '{0,-15} {1,-16} {2}' -f $r.kind, $r.key, $r.azureName
+        if ($r.uses) { $line += "   uses $(@($r.uses) -join ', ')" }
+        Note $line
+    }
+    foreach ($m in @($a.missing)) { Say "    ! $($m.name) ($($m.type)): $(@($m.resources) -join ', '): no kind in the catalog" 'Yellow' }
+    if ($a.prompts) { Say "    ! a prompt to add each is in $($a.prompts): paste it to Claude Code in the LazyBicep repository" 'Yellow' }
+    foreach ($x in @($a.notes)) { Say "    ! $x" 'Yellow' }
+    return $a
+}
+
+# After the map of an import: the real names as the environment's answers (marked imported, so its first
+# run asks every question once with them as the defaults). The keys are the map's (renamed ones followed).
+function Write-ImportedEnvironment($Import) {
+    $envName = [string]$Import.environmentName
+    $file = Join-Path $infra "environments\$envName.json"
+    if ((Test-Path $file) -and -not (Confirm-Step "infra/environments/$envName.json exists: replace it with the imported names?" -DefaultNo)) { return }
+    $src = $Import.environment
+    $names = [ordered]@{}
+    $groups = [ordered]@{}
+    foreach ($p in $src.names.PSObject.Properties) {
+        $k = $p.Name
+        if ($script:keyOf -and $script:keyOf.ContainsKey($k)) { $k = $script:keyOf[$k] }
+        if ($k) { $names[$k] = [string]$p.Value }
+    }
+    foreach ($p in $src.groups.PSObject.Properties) {
+        $k = $p.Name
+        if ($script:keyOf -and $script:keyOf.ContainsKey($k)) { $k = $script:keyOf[$k] }
+        if ($k -and $names.Contains($k)) { $groups[$k] = [string]$p.Value }
+    }
+    # A Function App's Flex Consumption plan: the map's resource it runs on.
+    foreach ($x in @($Import.extraNames)) {
+        $of = [string]$x.of
+        if ($script:keyOf -and $script:keyOf.ContainsKey($of)) { $of = $script:keyOf[$of] }
+        $c = @($map.connections | Where-Object { $_.from -eq $of -and $_.kind -eq $x.connection }) | Select-Object -First 1
+        if ($c) { $names[$c.to] = [string]$x.name }
+    }
+    # The resource group's key is the map's.
+    $rgDef = @($map.resources | Where-Object { $_.ask -eq 'group' }) | Select-Object -First 1
+    if ($rgDef -and $names.Contains('resourceGroup') -and $rgDef.key -ne 'resourceGroup') { $names[$rgDef.key] = $names['resourceGroup']; $names.Remove('resourceGroup') }
+    $subs = [ordered]@{}
+    foreach ($d in @($map.resources | Where-Object { $_.target })) { $subs[[string]$d.target] = '' }
+    $answers = [ordered]@{ imported = [string]$src.imported; subscriptionId = [string]$src.subscriptionId; location = [string]$src.location }
+    if ($src.staticLocation) { $answers.staticLocation = [string]$src.staticLocation }
+    $answers.prefix = [string]$naming.defaults.prefix
+    $answers.subs = $subs
+    $answers.names = $names
+    $answers.groups = $groups
+    New-Item -ItemType Directory -Force -Path (Split-Path $file) | Out-Null
+    [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $answers -Depth 10) + "`n", (New-Object Text.UTF8Encoding $false))
+    Ok "infra/environments/$envName.json written: the real names of $envName (its first dry run asks every question once with them)"
 }
 
 # A new project: its name and prefix, then its resources: suggested by an analysis of the solution and
@@ -2119,11 +2270,14 @@ function Invoke-Init {
         Note "from $SpecFile"
     }
     $suggested = $null
+    $script:imported = $null
     if (-not $SpecFile) {
         Head 'Analysis'
         $how = 'analyze'
-        if (-not $Analyze) { $how = Select-Option 'Analyze the solution and suggest its resources, or add them by hand' @('analyze', 'manual') 'analyze' }
+        if ($Import) { $how = 'azure' }
+        elseif (-not $Analyze) { $how = Select-Option 'Analyze the solution, import from Azure (resource groups), or add the resources by hand' @('analyze', 'azure', 'manual') 'analyze' }
         if ($how -eq 'analyze') { $suggested = Get-Analysis }
+        elseif ($how -eq 'azure') { $suggested = Get-AzureImport; $script:imported = $suggested }
         else { Note 'by hand: the resources one by one from the catalog' }
         if ($suggested) { $p = $suggested.project }
     }
@@ -2178,6 +2332,10 @@ function Invoke-Init {
         return 1
     }
     Save-Map
+    if ($script:imported -and $script:imported.environmentName) {
+        if ($script:importMode -eq 'connect') { Write-ImportedEnvironment $script:imported }
+        else { Note "new resources: $($script:imported.environmentName)'s first dry run plans them with the naming rules (the imported ones stay as they are)" }
+    }
     Head 'Next steps'
     Note 'A dry run asks the names of every resource for an environment and shows what would be created:'
     Note '  .\infra\azure-setup.ps1 -DryRun     (or .\infra\lazybicep.ps1)'
@@ -2254,6 +2412,11 @@ function Invoke-Setup {
                 Note "defaults from infra/environments/$from.json, moved to ${envAbbr}: names, custom domains and the deploy branch with $envAbbr instead of $from (each still asked); shared resources kept"
             }
         }
+    }
+    # Imported from Azure (infra/import.ps1): the real names, not answers yet: every question once.
+    if ($saved -and $saved.imported -and $script:mode -ne 'check') {
+        $script:fromCopy = $true
+        Note "imported: $($saved.imported)"
     }
     # Saved answers: keep them all (the default; each is shown in grey) or go through the questions.
     if ($saved -and -not $script:fromCopy -and $script:mode -ne 'check') {

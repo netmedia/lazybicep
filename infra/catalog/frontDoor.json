@@ -1,0 +1,31 @@
+{
+  "kind": "frontDoor",
+  "title": "Front Door (CDN)",
+  "about": "Azure Front Door Standard or Premium (the CDN; the classic Azure CDN is retired) in front of an app of the map (a Static Web App, an App Service or a Function App): one global endpoint (<name>.azurefd.net) with HTTPS only, caching and compression if wanted, health probes on the app.",
+  "addable": true,
+  "keyDefault": "cdn",
+  "naming": { "type": "afd", "about": "Front Door (CDN) profile", "maxLength": 90 },
+  "questions": [
+    { "id": "cache", "label": "Cache what <title> serves (on for a front end's files, off for an API)", "default": "on", "options": ["on", "off"] }
+  ],
+  "requires": [
+    { "kinds": ["staticWebApp", "appService", "functionApp"], "as": "origin", "field": "origin", "question": "Which app is <title> in front of?", "connection": { "kind": "origin", "what": "is in front of", "via": "its origin (the app's default host name)" } }
+  ],
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (Front Door: <name>.azurefd.net)",
+    "type": "afd",
+    "armType": "Microsoft.Cdn/profiles",
+    "ask": "own",
+    "apiVersion": "2024-02-01",
+    "param": "<key>Name",
+    "kind": "frontDoor",
+    "cache": "<q.cache>",
+    "role": "Front Door in front of <origin>: HTTPS only, health probes; the app stays reachable directly (restrict it to the service tag AzureFrontDoor.Backend and the X-Azure-FDID header by hand)",
+    "size": { "answer": "<key>Sku", "param": "<key>Sku", "label": "Tier of <title>", "options": ["Standard_AzureFrontDoor", "Premium_AzureFrontDoor"], "default": "Standard_AzureFrontDoor" },
+    "cost": { "kind": "table", "order": 3, "label": "Front Door {name} ({size}): base fee, plus traffic and requests", "prices": { "Standard_AzureFrontDoor": 32.40, "Premium_AzureFrontDoor": 305.50 } }
+  },
+  "providers": ["Microsoft.Cdn"],
+  "removeOrder": { "types": ["Microsoft.Cdn/profiles"], "before": ["Microsoft.Web/sites", "Microsoft.Web/staticSites", "Microsoft.Web/serverFarms"] }
+}
