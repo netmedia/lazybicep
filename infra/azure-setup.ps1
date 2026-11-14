@@ -124,7 +124,7 @@ With -Init: analyzes the solution without asking (infra/analyze.ps1). Each sugge
 with what it was found from; the usual questions follow, with its answers as their defaults.
 
 .PARAMETER Import
-With -Init: imports from Azure without asking first (infra/import.ps1): the subscription, the resource
+With -Init or -AddResource: imports from Azure without asking first (infra/import.ps1): the subscription, the resource
 groups and their resources are asked; each suggested resource is offered, and the real names become the
 environment's answers.
 
@@ -258,9 +258,11 @@ function Show-Usage {
     & $d '    typing the resource group''s name. Shared resources and DNS stay.'
     Write-Host ''
     & $b 'MAP MODES  (infra/infra.map.json; nothing in Azure changes)'
-    & $y '  -AddResource  [-Kind <kind>]'
+    & $y '  -AddResource  [-Kind <kind> | -Import [-ResourceGroup <rg>,...]]'
     & $d '    Adds a resource of the catalog with its connections (what it needs, which'
-    & $d '    apps use it), then generates and compiles main.bicep.'
+    & $d '    apps use it), then generates and compiles main.bicep. Or imports resources'
+    & $d '    from Azure (asked first; -Import: without asking): connected, their names go'
+    & $d '    into the environment''s answers; what the map has already is left out.'
     & $y '  -RemoveResource  -Key <key>'
     & $d '    Takes a resource out of the map with everything that refers to it; then'
     & $d '    offers to DELETE it from Azure (no by default; per environment its exact name'
@@ -310,7 +312,7 @@ function Show-Usage {
     & $g '  .\infra\azure-setup.ps1 -Init -Analyze'
     Write-Host ''
     & $g '  # A new project from what is in Azure already'
-    & $g '  .\infra\azure-setup.ps1 -Init -Import -ResourceGroup nm-erp-resgr-prod'
+    & $g '  .\infra\azure-setup.ps1 -Init -Import -ResourceGroup contoso-shop-resgr-prod'
     Write-Host ''
     & $g '  # A new project from a spec file'
     & $g '  .\infra\azure-setup.ps1 -Init -SpecFile spec.json'
@@ -1846,13 +1848,36 @@ function Invoke-AddResource {
     $addable = @(Get-Blueprints | Where-Object { $_.addable } | Sort-Object kind)
     $kinds = @($addable | ForEach-Object { $_.kind })
     Head 'Resource'
-    if ($Kind -and $kinds -contains $Kind) { $k = $Kind; Note "kind: $Kind" }
-    else {
-        foreach ($b in $addable) { Note ("{0,-16} {1}" -f $b.kind, $b.title) }
-        $k = Select-Option 'Kind of resource' $kinds 'sqlDatabase'
+    $from = 'catalog'
+    if ($Import) { $from = 'azure' }
+    elseif (-not $Kind) { $from = Select-Option 'Add from the catalog, or import from Azure (resources that exist already)' @('catalog', 'azure') 'catalog' }
+    $script:imported = $null
+    if ($from -eq 'azure') {
+        $imp = Get-AzureImport
+        if (-not $imp) { throw 'Nothing to import (see above).' }
+        $script:imported = $imp
+        # What the map has already, by its name in that environment's answers.
+        $known = @{}
+        $saved = Read-Json (Join-Path $infra "environments\$($imp.environmentName).json")
+        if ($saved -and $saved.names) {
+            foreach ($r in @($imp.resources)) {
+                foreach ($p in $saved.names.PSObject.Properties) {
+                    if ([string]$p.Value -eq [string]$r.azureName -and (Get-Def $p.Name) -and (Get-Def $p.Name).kind -eq $r.kind) { $known[[string]$r.key] = $p.Name }
+                }
+            }
+        }
+        $keysBefore = @(Get-MapKeys)
+        Add-Suggested $imp $known
+        $newKey = (@(Get-MapKeys | Where-Object { $keysBefore -notcontains $_ })) -join ', '
+        if (-not $newKey) { Note 'nothing was added'; if ($script:ui) { Send ([ordered]@{ t = 'summary'; env = ''; ghEnv = ''; open = @(); code = 1; cancelled = $true }) }; return 1 }
+    } else {
+        if ($Kind -and $kinds -contains $Kind) { $k = $Kind; Note "kind: $Kind" }
+        else {
+            foreach ($b in $addable) { Note ("{0,-16} {1}" -f $b.kind, $b.title) }
+            $k = Select-Option 'Kind of resource' $kinds 'sqlDatabase'
+        }
+        $newKey = Add-FromBlueprint $k $null
     }
-    $before = ConvertTo-Json -InputObject $map -Depth 20 -Compress
-    $newKey = Add-FromBlueprint $k $null
     Head 'Changes'
     if (-not (Confirm-Step "Write infra/infra.map.json$(if ($script:namingChanged) { ' and naming.json' }) and generate main.bicep?")) {
         Note 'nothing was written'
@@ -1860,6 +1885,10 @@ function Invoke-AddResource {
         return 1
     }
     Save-Map
+    if ($script:imported) {
+        if ($script:importMode -eq 'connect') { Write-ImportedEnvironment $script:imported }
+        else { Note "new resources: a dry run of $($script:imported.environmentName) plans them with the naming rules (the imported ones stay as they are)" }
+    }
     Head 'Next steps'
     Note "A dry run asks the names of what is new and shows what would be created: .\infra\azure-setup.ps1 -DryRun"
     Note 'then a start creates it (environment by environment); commit infra/ (the map, naming.json, main.bicep).'
@@ -2096,9 +2125,12 @@ function Get-Analysis {
 # The analysis's resources, each offered with what it was found from. Adding one asks the usual questions
 # with the analysis's answers as the defaults; one left out (or given another key) is left out of (or
 # renamed in) what the apps after it use.
-function Add-Suggested($Analysis) {
+function Add-Suggested($Analysis, [hashtable]$Known) {
     $keyOf = @{}
+    # Already in the map (an import into a map: the same name in Azure): not offered, its key used instead.
+    if ($Known) { foreach ($k in $Known.Keys) { $keyOf[$k] = $Known[$k] } }
     foreach ($r in @($Analysis.resources)) {
+        if ($Known -and $Known.ContainsKey([string]$r.key)) { Note "$($r.azureName): in the map already as $($Known[[string]$r.key])"; continue }
         Head "Resources: suggested $($r.kind) $($r.title)"
         foreach ($e in @($r.evidence)) { Note "found: $e" }
         if (-not (Confirm-Step "Add $($r.title) ($($r.kind))?")) { $keyOf[[string]$r.key] = $null; Note 'left out'; continue }
@@ -2114,6 +2146,12 @@ function Add-Suggested($Analysis) {
             }
         }
         if ($spec.uses) { $spec.uses = @(@($spec.uses) | ForEach-Object { if ($keyOf.ContainsKey($_)) { $keyOf[$_] } else { $_ } } | Where-Object { $_ }) }
+        if ($spec.requires) {
+            foreach ($q in @($spec.requires.PSObject.Properties)) {
+                if (-not $keyOf.ContainsKey([string]$q.Value)) { continue }
+                if ($keyOf[[string]$q.Value]) { $spec.requires.($q.Name) = $keyOf[[string]$q.Value] } else { $spec.requires.PSObject.Properties.Remove($q.Name) }
+            }
+        }
         if ($spec.roles) {
             $roles = [ordered]@{}
             foreach ($q in $spec.roles.PSObject.Properties) {
@@ -2217,7 +2255,8 @@ function Get-AzureImport {
 function Write-ImportedEnvironment($Import) {
     $envName = [string]$Import.environmentName
     $file = Join-Path $infra "environments\$envName.json"
-    if ((Test-Path $file) -and -not (Confirm-Step "infra/environments/$envName.json exists: replace it with the imported names?" -DefaultNo)) { return }
+    $old = Read-Json $file
+    if ($old -and -not (Confirm-Step "Add the imported names to infra/environments/$envName.json (its other answers stay)?")) { return }
     $src = $Import.environment
     $names = [ordered]@{}
     $groups = [ordered]@{}
@@ -2243,6 +2282,24 @@ function Write-ImportedEnvironment($Import) {
     if ($rgDef -and $names.Contains('resourceGroup') -and $rgDef.key -ne 'resourceGroup') { $names[$rgDef.key] = $names['resourceGroup']; $names.Remove('resourceGroup') }
     $subs = [ordered]@{}
     foreach ($d in @($map.resources | Where-Object { $_.target })) { $subs[[string]$d.target] = '' }
+    if ($old) {
+        # Into saved answers: the imported resources' names (and groups, sub names) only.
+        $added = @()
+        if (-not $old.names) { Set-Prop $old 'names' ([pscustomobject]@{}) }
+        if (-not $old.groups) { Set-Prop $old 'groups' ([pscustomobject]@{}) }
+        if (-not $old.subs) { Set-Prop $old 'subs' ([pscustomobject]@{}) }
+        foreach ($k in $names.Keys) {
+            if ($k -eq 'resourceGroup') { continue }
+            if ([string]$old.names.$k -ne [string]$names[$k]) { Set-Prop $old.names $k $names[$k]; $added += $k }
+            if ($groups.Contains($k)) { Set-Prop $old.groups $k $groups[$k] }
+        }
+        foreach ($t in $subs.Keys) { if ($null -eq $old.subs.$t) { Set-Prop $old.subs $t '' } }
+        if ($names.Contains('resourceGroup') -and $old.names.resourceGroup -and $old.names.resourceGroup -ne $names['resourceGroup']) { Note "X $envName's resource group is $($old.names.resourceGroup), these are in $($names['resourceGroup']): the map makes its own resources in $($old.names.resourceGroup)" }
+        [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $old -Depth 10) + "`n", (New-Object Text.UTF8Encoding $false))
+        if ($added.Count) { Ok "infra/environments/$envName.json: the names of $($added -join ', ') (a dry run of $envName finds them)" }
+        else { Ok "infra/environments/$envName.json has their names already" }
+        return
+    }
     $answers = [ordered]@{ imported = [string]$src.imported; subscriptionId = [string]$src.subscriptionId; location = [string]$src.location }
     if ($src.staticLocation) { $answers.staticLocation = [string]$src.staticLocation }
     $answers.prefix = [string]$naming.defaults.prefix

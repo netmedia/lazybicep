@@ -46,7 +46,7 @@ repository), then:
 .\infra\lazybicep.ps1                         # New project: n
 .\infra\azure-setup.ps1 -Init                 # the same without the UI
 .\infra\azure-setup.ps1 -Init -Analyze        # analyze the solution without asking first
-.\infra\azure-setup.ps1 -Init -Import -ResourceGroup nm-erp-resgr-prod   # import from Azure
+.\infra\azure-setup.ps1 -Init -Import -ResourceGroup contoso-shop-resgr-prod   # import from Azure
 .\infra\azure-setup.ps1 -Init -SpecFile spec.json
 ```
 
@@ -73,7 +73,7 @@ What an app's project references bring counts for it (EF Core in a data library 
 references it use SQL). Test projects are skipped; workers, consoles, .NET Framework, Service Bus topics,
 Redis, Cosmos DB, PostgreSQL, MySQL, MongoDB, Event Hubs and SignalR are noted (no kind in the catalog).
 
-Then every suggestion is offered with what it was found from (`Add Erp (ErpDb) (sqlDatabase)? [Y/n]`),
+Then every suggestion is offered with what it was found from (`Add Shop (ShopDb) (sqlDatabase)? [Y/n]`),
 and adding one asks the usual questions with the analysis's answers as the defaults: change anything there.
 One left out (or given another key) is left out of (or renamed in) what the apps after it use. A runtime
 Azure doesn't offer any more (the project targets an old .NET) is suggested as the closest newer one, with
@@ -120,7 +120,12 @@ to Claude Code in the LazyBicep repository; once the kind is in the kit, `initin
 brings it and `-AddResource` adds the resource. `.\infra\import.ps1 -ResourceGroup <rg> [-List]` shows
 what an import would suggest without starting.
 
-Either way it asks the project's name, the prefix of its names (`client-project`, e.g. `nm-myerp`), the
+**Into a map that exists** (lazybicep: `a` on Home or the map, then azure; or `-AddResource -Import`): the
+same picking and suggestions. What the map has already (the same name in that environment's answers) isn't
+offered again, and the imported apps that use it are connected to it. With connect, the imported names are
+added to `environments/<env>.json` (its other answers stay).
+
+Either way it asks the project's name, the prefix of its names (`client-project`, e.g. `contoso-shop`), the
 region and the name of the deployments. By hand, then its resources one by one from the catalog (after
 the suggestions, the same for more): what each needs (a database:
 which SQL server, or a new one first), which apps use it (each gets its roles and settings), and for an
@@ -132,11 +137,11 @@ A **spec file** answers all of it (examples/spec.example.json in the LazyBicep r
 
 ```json
 {
-  "project": { "name": "My ERP", "prefix": "nm-myerp", "region": "westeurope", "deploymentName": "myerp-{env}" },
+  "project": { "name": "Contoso Shop", "prefix": "contoso-shop", "region": "westeurope", "deploymentName": "shop-{env}" },
   "resources": [
     { "kind": "appServicePlan", "key": "plan" },
-    { "kind": "appService", "key": "api", "title": "ERP API", "answers": { "runtime": "DOTNETCORE|10.0" }, "requires": { "appServicePlan": "plan" } },
-    { "kind": "sqlDatabase", "key": "erpDb", "requires": { "sqlServer": "new" }, "users": ["api"] },
+    { "kind": "appService", "key": "api", "title": "Shop API", "answers": { "runtime": "DOTNETCORE|10.0" }, "requires": { "appServicePlan": "plan" } },
+    { "kind": "sqlDatabase", "key": "shopDb", "requires": { "sqlServer": "new" }, "users": ["api"] },
     { "kind": "serviceBus", "key": "bus", "answers": { "queues": "invoices, mail" }, "users": ["api"], "roles": { "api": ["Azure Service Bus Data Sender"] } }
   ]
 }
@@ -163,7 +168,7 @@ az login                    # add --tenant <tenant> if the subscription is in an
 | Check | `-Check` | For an environment that is set up: its saved answers, no questions; reports what is in place and what is missing. Changes nothing |
 | Start | `-Start` | Asks every question, then creates and updates what is missing, each change asked first |
 | Remove all | `-Remove` (`-RemoveAll`) | Deletes everything the setup created for an environment, shown first and confirmed by typing the resource group's name |
-| Add a resource | `-AddResource [-Kind <kind>]` | Adds a resource of the catalog to the map with its connections, generates `main.bicep` |
+| Add a resource | `-AddResource [-Kind <kind> \| -Import [-ResourceGroup <rg>]]` | Adds a resource of the catalog to the map with its connections, generates `main.bicep`; or imports resources from Azure into the map (asked first; see "Importing from Azure") |
 | Remove a resource | `-RemoveResource [-Key <key>]` | Takes a resource out of the map with everything that refers to it, generates `main.bicep`; then offers to **delete it from Azure**: no by default, then per environment its exact name typed (and `delete prod` for production); only what the setup made, never a shared resource; an app's role assignments go first; a Key Vault's purge is asked |
 | New project | `-Init [-SpecFile <file>]` | Makes the map of a new project |
 

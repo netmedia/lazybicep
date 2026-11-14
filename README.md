@@ -59,7 +59,7 @@ GitHub deployments) or **new** (the same resources made new by the map's definit
 become the apps, and connection strings, packages and code tell what they use (SQL databases, Service Bus
 and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what
 it was found from; the usual questions follow with its answers as the defaults. Or **by hand**: the
-project's name, the prefix of its names (`client-project`, e.g. `nm-myerp`), the region, then the resources
+project's name, the prefix of its names (`client-project`, e.g. `contoso-shop`), the region, then the resources
 one by one from the catalog. Or answer all of it with a spec file:
 `.\infra\azure-setup.ps1 -Init -SpecFile spec.json` (`examples/spec.example.json`; `.\infra\analyze.ps1
 -Out spec.json` writes one from the solution).
