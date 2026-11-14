@@ -30,7 +30,7 @@ console since Windows 10).
 
 Keys (? shows them in the UI too)
   Home   up/down environment, Tab environments <-> actions, Enter run the action,
-         d dry run, c check, s start, r remove all, a add resource, x remove resource, m map, t refresh token on/off,
+         d dry run, c check, s start, r remove all, a add resource (catalog or Azure), x remove resource, m map, t refresh token on/off,
          ? help, q quit
   Map    up/down resource, PgUp/PgDn scroll, a add resource, x remove it, Esc back
   Run    Enter answer (empty = the value shown), left/right choose, Space pick (several), y/n,
@@ -1168,12 +1168,12 @@ function Draw-Help([int]$W, [int]$H) {
         @('c', 'check: the saved answers, no questions; nothing changes'),
         @('s', 'start: creates and updates what is missing, each change asked first'),
         @('r', 'remove all: deletes everything the setup created for the environment (confirmed by name)'),
-        @('a', 'add a resource from the catalog to the map'), @('x', 'remove a resource from the map; deleting it from Azure is asked (typed name)'), @('m', 'the map'),
+        @('a', 'add a resource to the map: from the catalog, or imported from Azure (asked first)'), @('x', 'remove a resource from the map; deleting it from Azure is asked (typed name)'), @('m', 'the map'),
         @('t', 'refresh token: puts a Static Web App''s token into GitHub again on start'),
         @('?', 'this help'), @('q', 'quit'))
     & $section 'MAP' @(
         @("$($g.up) $($g.down)", 'select a resource (or connections, domains, GitHub...)'),
-        @('PgUp PgDn', 'scroll the details'), @('a', 'add a resource'), @('x', 'remove the selected resource from the map'), @('Esc', 'back'))
+        @('PgUp PgDn', 'scroll the details'), @('a', 'add a resource (catalog or Azure)'), @('x', 'remove the selected resource from the map'), @('Esc', 'back'))
     & $section 'RUN' @(
         @('Enter', 'answer (empty = the value shown)'), @("$([string][char]0x2190) $([string][char]0x2192)", 'choose'),
         @('Space', 'pick or unpick (questions with several answers)'), @('y n', 'yes, no'),

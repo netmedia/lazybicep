@@ -176,7 +176,7 @@ function Read-LooseJson([string]$File) {
     $t = [regex]::Replace($t, ',(\s*[}\]])', '$1')
     try { return ($t | ConvertFrom-Json) } catch { return $null }
 }
-# Every string of a JSON document with its path (ConnectionStrings:Erp, Values:AzureWebJobsStorage...).
+# Every string of a JSON document with its path (ConnectionStrings:Shop, Values:AzureWebJobsStorage...).
 function Get-Leaves($Node, [string]$Prefix, $Into) {
     if ($null -eq $Node) { return }
     if ($Node -is [string]) { [void]$Into.Add([pscustomobject]@{ Path = $Prefix; Value = $Node }); return }
@@ -190,8 +190,8 @@ function Get-Leaves($Node, [string]$Prefix, $Into) {
         for ($i = 0; $i -lt $Node.Count; $i++) { Get-Leaves $Node[$i] "${Prefix}:$i" $Into }
     }
 }
-# A map key from a name: letters and digits, starting with a small letter (ErpDb -> erpDb, orders-queue
-# -> ordersQueue, ERP_DB -> erpDb).
+# A map key from a name: letters and digits, starting with a small letter (ShopDb -> shopDb, orders-queue
+# -> ordersQueue, SHOP_DB -> shopDb).
 function Get-KeyName([string]$Name) {
     $parts = @([regex]::Split($Name, '[^A-Za-z0-9]+') | Where-Object { $_ })
     if (-not $parts.Count) { return 'app' }
@@ -544,7 +544,7 @@ foreach ($p in @($projects | Where-Object { -not $_.Kind })) {
 $tests = @($projects | Where-Object { $_.Type -eq 'test' }).Count
 if ($tests) { Add-Unique $notes "$tests test project(s): not deployed" }
 
-# Keys: the apps' names without what they all start with (Contoso.Erp.Api, Contoso.Erp.Admin.Api -> api,
+# Keys: the apps' names without what they all start with (Contoso.Shop.Api, Contoso.Shop.Admin.Api -> api,
 # adminApi); a single app keeps its last part.
 $dotted = New-Object Collections.ArrayList
 foreach ($a in $apps) { if ($a.Lang -eq 'dotnet') { [void]$dotted.Add([string[]]$a.Name.Split('.')) } }

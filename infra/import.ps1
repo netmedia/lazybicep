@@ -74,10 +74,10 @@ Returns the result as an object, without output (for infra/azure-setup.ps1).
 Shows the usage guide and exits.
 
 .EXAMPLE
-.\infra\import.ps1 -ResourceGroup nm-erp-resgr-prod
+.\infra\import.ps1 -ResourceGroup contoso-shop-resgr-prod
 
 .EXAMPLE
-.\infra\import.ps1 -ResourceGroup nm-erp-resgr-prod,nm-shared-resgr -Out spec.json
+.\infra\import.ps1 -ResourceGroup contoso-shop-resgr-prod,contoso-shared-resgr -Out spec.json
 
 .NOTES
 LazyBicep is a Netmedia product: https://netmedia.agency, netmedia@netmedia.hr,
@@ -279,7 +279,7 @@ if (-not $Environment) {
 
 # --- keys from names ---------------------------------------------------------------------------------------
 
-# A name without its prefix, type and environment parts (nm-erp-api-apiapp-prod -> api); $null when only
+# A name without its prefix, type and environment parts (contoso-shop-api-apiapp-prod -> api); $null when only
 # those are left (or a name without hyphens, like a storage account's).
 $noise = New-Object Collections.Generic.HashSet[string]
 foreach ($w in @('prod', 'production', 'test', 'stag', 'staging', 'dev', 'development', 'accp', 'acceptance', 'uat', 'qa', 'app', 'api', 'apiapp', 'webapp', 'web', 'func', 'fa', 'fn', 'functions', 'st', 'store', 'sql', 'sqldb', 'sqlserv', 'db', 'kv', 'vault', 'sb', 'sbns', 'sbus', 'bus', 'log', 'logs', 'law', 'appi', 'ai', 'insights', 'plan', 'asp', 'appplan', 'swa', 'stapp', 'statapp', 'rg', 'resgr', 'queue')) { [void]$noise.Add($w) }
