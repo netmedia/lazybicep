@@ -36,7 +36,7 @@ Keys (? shows them in the UI too)
   Run    Enter answer (empty = the value shown), left/right choose, Space pick (several), y/n,
          '<' previous question, PgUp/PgDn/Home/End scroll the log, Esc stop (asked first);
          when done: Enter or Esc back
-  New    (no map yet) n new project, q quit
+  New    (no map yet) n new project (first: analyze the solution, or by hand), q quit
 
 .PARAMETER Help
 Shows the usage guide (screens, keys, commands) and exits.
@@ -144,7 +144,9 @@ function Show-Usage {
     & $d '    The steps with their progress, the resources'' states, the log, and the question'
     & $d '    at the bottom (chips for choices, toggles for several, a text field).'
     & $y '  New project'
-    & $d '    When infra has no infra.map.json yet: starts the map from the catalog.'
+    & $d '    When infra has no infra.map.json yet: starts the map. First asks to analyze the'
+    & $d '    solution (infra\analyze.ps1 suggests the apps and what they use, each offered'
+    & $d '    with what it was found from) or to add the resources from the catalog by hand.'
     & $y '  Help'
     & $d '    ? on Home or Map: keys, commands, who made it.'
     Write-Host ''
@@ -381,7 +383,7 @@ function Start-Run([string]$Mode, [string]$Extra) {
     if ($Mode -eq 'Remove') { $steps = @($map.steps.remove) }
     if ($mapModes -contains $Mode) { $steps = @('Resource', 'Changes', 'Generate', 'Next steps') }
     if ($Mode -eq 'RemoveResource') { $steps = @('Resource', 'Changes', 'Generate', 'Azure', 'Next steps') }
-    if ($Mode -eq 'Init') { $steps = @('Project', 'Resources', 'Changes', 'Generate', 'Next steps') }
+    if ($Mode -eq 'Init') { $steps = @('Analysis', 'Project', 'Resources', 'Changes', 'Generate', 'Next steps') }
     $run = [pscustomobject]@{
         Mode = $Mode; Label = $label; Env = $env.Abbr; Full = $env.Full; Proc = $null; Out = $null; Err = $null; OutDone = $false; ErrDone = $false
         Log = (New-Object Collections.ArrayList); Version = 0; Lines = $null; LinesKey = ''; Scroll = 0; Marks = (New-Object Collections.ArrayList)
@@ -1180,7 +1182,8 @@ function Draw-Help([int]$W, [int]$H) {
         @('d c s r', '.\infra\azure-setup.ps1 -DryRun | -Check | -Start | -Remove -Environment <env>'),
         @('a', '.\infra\azure-setup.ps1 -AddResource [-Kind sqlDatabase]'),
         @('x', '.\infra\azure-setup.ps1 -RemoveResource -Key <key>'),
-        @('new project', '.\infra\azure-setup.ps1 -Init [-SpecFile spec.json]'),
+        @('new project', '.\infra\azure-setup.ps1 -Init [-Analyze] [-SpecFile spec.json]'),
+        @('analysis', '.\infra\analyze.ps1 [-Out spec.json]   (what it would suggest; changes nothing)'),
         @('everything', '.\infra\azure-setup.ps1 -Help   and   infra\LAZYBICEP.md'))
     $bodyRows = $H - 2
     $max = [Math]::Max(0, $lines.Count - $bodyRows)
@@ -1200,9 +1203,11 @@ function Draw-New([int]$W, [int]$H) {
     [void]$lines.Add(@())
     [void]$lines.Add(@(S '  A NEW PROJECT' $st.title))
     [void]$lines.Add(@())
-    foreach ($l in (Wrap 'This infra folder has no infra.map.json yet. A new project asks its name and the prefix of its names, then its resources one by one from the catalog (what each needs, which apps use it), writes the map and generates main.bicep. Nothing in Azure changes until a start.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
+    foreach ($l in (Wrap 'This infra folder has no infra.map.json yet. A new project first asks whether to analyze the solution: the .NET projects, package.json and Python projects become the apps (App Service, Function App, Static Web App); connection strings, packages and code tell what they use (SQL databases by their connection strings'' names, Service Bus and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what it was found from, then the usual questions follow with its answers as the defaults. Or the resources one by one from the catalog, by hand. Then it writes the map and generates main.bicep. Nothing in Azure changes until a start.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
     [void]$lines.Add(@())
-    foreach ($l in (Wrap 'Or from a spec file: .\infra\azure-setup.ps1 -Init -SpecFile spec.json (infra/README.md, "A new project").' ($W - 8))) { [void]$lines.Add(@(S "  $l" $st.muted)) }
+    foreach ($l in (Wrap 'What the analysis would suggest, without starting: .\infra\analyze.ps1' ($W - 8))) { [void]$lines.Add(@(S "  $l" $st.muted)) }
+    [void]$lines.Add(@())
+    foreach ($l in (Wrap 'Or from a spec file: .\infra\azure-setup.ps1 -Init -SpecFile spec.json (infra/LAZYBICEP.md, "A new project").' ($W - 8))) { [void]$lines.Add(@(S "  $l" $st.muted)) }
     [void]$lines.Add(@())
     [void]$lines.Add(@(S '  THE CATALOG' $st.title))
     foreach ($f in @(Get-ChildItem (Join-Path $infra 'catalog') -Filter '*.json' | Where-Object { $_.Name -ne 'roles.json' })) {
