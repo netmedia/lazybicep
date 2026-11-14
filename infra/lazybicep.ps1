@@ -36,7 +36,7 @@ Keys (? shows them in the UI too)
   Run    Enter answer (empty = the value shown), left/right choose, Space pick (several), y/n,
          '<' previous question, PgUp/PgDn/Home/End scroll the log, Esc stop (asked first);
          when done: Enter or Esc back
-  New    (no map yet) n new project (first: analyze the solution, or by hand), q quit
+  New    (no map yet) n new project (first: analyze the solution, import from Azure, or by hand), q quit
 
 .PARAMETER Help
 Shows the usage guide (screens, keys, commands) and exits.
@@ -145,8 +145,9 @@ function Show-Usage {
     & $d '    at the bottom (chips for choices, toggles for several, a text field).'
     & $y '  New project'
     & $d '    When infra has no infra.map.json yet: starts the map. First asks to analyze the'
-    & $d '    solution (infra\analyze.ps1 suggests the apps and what they use, each offered'
-    & $d '    with what it was found from) or to add the resources from the catalog by hand.'
+    & $d '    solution (infra\analyze.ps1 suggests the apps and what they use), to import from'
+    & $d '    Azure (infra\import.ps1: resource groups and their resources, connected or made'
+    & $d '    new), or to add the resources from the catalog by hand.'
     & $y '  Help'
     & $d '    ? on Home or Map: keys, commands, who made it.'
     Write-Host ''
@@ -1184,6 +1185,7 @@ function Draw-Help([int]$W, [int]$H) {
         @('x', '.\infra\azure-setup.ps1 -RemoveResource -Key <key>'),
         @('new project', '.\infra\azure-setup.ps1 -Init [-Analyze] [-SpecFile spec.json]'),
         @('analysis', '.\infra\analyze.ps1 [-Out spec.json]   (what it would suggest; changes nothing)'),
+        @('import', '.\infra\import.ps1 -ResourceGroup <rg> [-List]   (what an import would suggest)'),
         @('everything', '.\infra\azure-setup.ps1 -Help   and   infra\LAZYBICEP.md'))
     $bodyRows = $H - 2
     $max = [Math]::Max(0, $lines.Count - $bodyRows)
@@ -1203,7 +1205,7 @@ function Draw-New([int]$W, [int]$H) {
     [void]$lines.Add(@())
     [void]$lines.Add(@(S '  A NEW PROJECT' $st.title))
     [void]$lines.Add(@())
-    foreach ($l in (Wrap 'This infra folder has no infra.map.json yet. A new project first asks whether to analyze the solution: the .NET projects, package.json and Python projects become the apps (App Service, Function App, Static Web App); connection strings, packages and code tell what they use (SQL databases by their connection strings'' names, Service Bus and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what it was found from, then the usual questions follow with its answers as the defaults. Or the resources one by one from the catalog, by hand. Then it writes the map and generates main.bicep. Nothing in Azure changes until a start.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
+    foreach ($l in (Wrap 'This infra folder has no infra.map.json yet. A new project first asks whether to analyze the solution: the .NET projects, package.json and Python projects become the apps (App Service, Function App, Static Web App); connection strings, packages and code tell what they use (SQL databases by their connection strings'' names, Service Bus and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what it was found from, then the usual questions follow with its answers as the defaults. Or import from Azure: pick resource groups and their resources, then connect to them (their real names become the environment''s answers; a start adds managed identities, roles, the GitHub trust and deployments) or make them new by the map''s definitions; kinds the catalog lacks get a prompt in infra/new-kinds.md. Or the resources one by one from the catalog, by hand. Then it writes the map and generates main.bicep. Nothing in Azure changes until a start.' ($W - 8))) { [void]$lines.Add(@(S "  $l")) }
     [void]$lines.Add(@())
     foreach ($l in (Wrap 'What the analysis would suggest, without starting: .\infra\analyze.ps1' ($W - 8))) { [void]$lines.Add(@(S "  $l" $st.muted)) }
     [void]$lines.Add(@())

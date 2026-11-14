@@ -32,6 +32,7 @@ Every script explains itself: run it with `-Help` (or `-h`) for its guide, modes
 | `infra\azure-setup.ps1` | (in the project) The same without the UI: `-DryRun`, `-Check`, `-Start`, `-Remove` (`-RemoveAll`), `-AddResource`, `-RemoveResource`, `-Init` |
 | `infra\generate.ps1` | (in the project) Makes `main.bicep` from the map (the setup runs it) |
 | `infra\analyze.ps1` | (in the project) Looks through the solution and suggests the map's resources (a new project runs it when asked to analyze); `-Out spec.json` writes them as a spec |
+| `infra\import.ps1` | (in the project) Reads resource groups in Azure and suggests the map from their resources, with their real names (a new project runs it when asked to import); missing kinds get a prompt in `infra\new-kinds.md` |
 
 **The .exe files** start the `.ps1` of the same name next to them (or in `infra\` below them), with the same
 arguments, in the same console (no execution policy to think about; double-click works too). The `.ps1`
@@ -51,7 +52,10 @@ cd D:\Development\Netmedia\MyProject
 .\lazybicep.exe                                         # New project: n
 ```
 
-It asks first whether to **analyze the solution**: the .NET projects, `package.json` and Python projects
+It asks first whether to **analyze the solution**, **import from Azure**, or add the resources **by hand**.
+The import reads resource groups that exist already: pick them and their resources, then **connect** (the
+map takes them over with their real names, and a start adds what is missing: managed identities, roles,
+GitHub deployments) or **new** (the same resources made new by the map's definitions). The analysis: the .NET projects, `package.json` and Python projects
 become the apps, and connection strings, packages and code tell what they use (SQL databases, Service Bus
 and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what
 it was found from; the usual questions follow with its answers as the defaults. Or **by hand**: the
