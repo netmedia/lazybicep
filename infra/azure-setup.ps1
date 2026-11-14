@@ -116,7 +116,12 @@ the resource (the end says how to delete it).
 With -RemoveResource: the resource's key in the map.
 
 .PARAMETER Init
-Starts the map of a new project (an empty instance): its name and prefix, then its resources.
+Starts the map of a new project (an empty instance): its name and prefix, then its resources. First asks
+whether to analyze the solution (infra/analyze.ps1 suggests the resources) or to add them by hand.
+
+.PARAMETER Analyze
+With -Init: analyzes the solution without asking (infra/analyze.ps1). Each suggested resource is offered
+with what it was found from; the usual questions follow, with its answers as their defaults.
 
 .PARAMETER SpecFile
 With -Init: a spec file with the project and its resources (infra/LAZYBICEP.md, "A new project"); no
@@ -176,6 +181,7 @@ param(
     [switch]$RemoveResource,
     [string]$Key,
     [switch]$Init,
+    [switch]$Analyze,
     [string]$SpecFile
 )
 
@@ -249,8 +255,12 @@ function Show-Usage {
     & $d '    Takes a resource out of the map with everything that refers to it; then'
     & $d '    offers to DELETE it from Azure (no by default; per environment its exact name'
     & $d '    typed, "delete prod" too for production; only what the setup made).'
-    & $y '  -Init  [-SpecFile <spec.json>]'
-    & $d '    Starts the map of a new project (an empty instance); a spec file answers all.'
+    & $y '  -Init  [-Analyze]  [-SpecFile <spec.json>]'
+    & $d '    Starts the map of a new project (an empty instance). Asks first: analyze the'
+    & $d '    solution (infra/analyze.ps1 suggests the apps, databases, Service Bus, storage,'
+    & $d '    Key Vault, Application Insights; each offered, then the usual questions) or'
+    & $d '    add the resources by hand. -Analyze: analyze without asking. A spec file'
+    & $d '    answers all.'
     Write-Host ''
     & $b 'OPTIONS'
     & $y '  -Environment <env>'
@@ -284,6 +294,9 @@ function Show-Usage {
     & $g '  # Add a SQL database (and a server, if there is none), then create it'
     & $g '  .\infra\azure-setup.ps1 -AddResource -Kind sqlDatabase'
     & $g '  .\infra\azure-setup.ps1 -Start -Environment test'
+    Write-Host ''
+    & $g '  # A new project from an analysis of the solution (each suggestion offered)'
+    & $g '  .\infra\azure-setup.ps1 -Init -Analyze'
     Write-Host ''
     & $g '  # A new project from a spec file'
     & $g '  .\infra\azure-setup.ps1 -Init -SpecFile spec.json'
@@ -1480,6 +1493,8 @@ function Select-Many([string]$Question, [string[]]$Options, [string[]]$Default) 
         else { Send ([ordered]@{ t = 'auto'; question = $Question; value = $shown }) }
         return $picked
     }
+    # A suggested default (an analysis) offers only what can be picked here.
+    $Default = @($Default | Where-Object { $_ -and $Options -contains $_ })
     # Resources of the map carry their tag (shared/separate, only if separate...).
     $labels = @($Options | ForEach-Object { $t = Get-Tag (Get-Def $_); if ($t) { "$_ · $t" } else { $_ } })
     $listed = @($Options | ForEach-Object { $t = Get-Tag (Get-Def $_); if ($t) { "$_ [$t]" } else { $_ } })
@@ -1529,8 +1544,27 @@ function Add-Use([string]$AppKey, [string]$ResKey, $Users, [hashtable]$Ph, $Role
 # "function" (Functions: DOTNET-ISOLATED|10.0, Node|22...). Empty when az can't tell (then any is taken).
 function Get-Runtimes([string]$Which) {
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) { return @() }
-    if ($Which -eq 'web') { return @(Try-Az @('webapp', 'list-runtimes', '--os', 'linux') | Where-Object { $_ } | ForEach-Object { ([string]$_) -replace '^([^:]+):', '$1|' }) }
-    return @(Try-Az @('functionapp', 'list-runtimes', '--os', 'linux') | Where-Object { $_ -and $_.linux_fx_version } | ForEach-Object { [string]$_.linux_fx_version })
+    # Asked once per run (every app asks it).
+    if (-not $script:runtimes) { $script:runtimes = @{} }
+    if (-not $script:runtimes.ContainsKey($Which)) {
+        if ($Which -eq 'web') { $script:runtimes[$Which] = @(Try-Az @('webapp', 'list-runtimes', '--os', 'linux') | Where-Object { $_ } | ForEach-Object { ([string]$_) -replace '^([^:]+):', '$1|' }) }
+        else { $script:runtimes[$Which] = @(Try-Az @('functionapp', 'list-runtimes', '--os', 'linux') | Where-Object { $_ -and $_.linux_fx_version } | ForEach-Object { [string]$_.linux_fx_version }) }
+    }
+    return @($script:runtimes[$Which])
+}
+# A suggested runtime Azure doesn't offer any more (the project targets an old version): the closest newer
+# one of the same stack, else the newest; $null when Azure's list isn't known or it is offered.
+function Get-NewerRuntime([string]$Runtime, [string]$Which, [string]$Hosting) {
+    $offered = @(Get-Runtimes $Which)
+    if ($Hosting -eq 'flex') { $offered = @($offered | Where-Object { $_ -match '^(DOTNET-ISOLATED|Node|Python|Java|PowerShell)\|' }) }
+    if (-not $offered.Count -or $offered -contains $Runtime) { return $null }
+    $num = { param($r) $v = 0.0; if ($r.Split('|')[-1] -match '^(\d+(\.\d+)?)') { $v = [double]$Matches[1] }; $v }
+    $stack = $Runtime.Split('|')[0]
+    $same = @($offered | Where-Object { $_.Split('|')[0] -ceq $stack } | Sort-Object { & $num $_ })
+    if (-not $same.Count) { return $null }
+    $newer = @($same | Where-Object { (& $num $_) -gt (& $num $Runtime) })
+    if ($newer.Count) { return $newer[0] }
+    return $same[-1]
 }
 # When a runtime's support ends, as Azure reports it (Functions' Flex Consumption list has the dates;
 # App Service's .NET, Node, Python versions end with the same ones). $null when unknown.
@@ -1672,7 +1706,7 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
         }
         if ($apps.Count) {
             $defaultApps = @($apps | Select-Object -First 1)
-            if ($script:specData) { $defaultApps = @($Spec.users | Where-Object { $_ }) }
+            if ($script:specData -or ($Spec -and $Spec.users)) { $defaultApps = @($Spec.users | Where-Object { $_ }) }
             foreach ($a in (Select-Many (Get-Filled $bp.users.question $ph $answers) $apps $defaultApps)) {
                 $rd = $null
                 if ($Spec -and $Spec.roles -and $Spec.roles.$a) { $rd = @($Spec.roles.$a) }
@@ -2016,10 +2050,64 @@ function New-BaseMap([string]$Name, [string]$Description, [string]$Region, [stri
     }
 }
 
-# A new project: its name and prefix, then its resources from the catalog, one by one (or all of them
-# from a spec file: -Init -SpecFile spec.json, see infra/README.md), then the map and main.bicep.
+# The analysis of the solution (infra/analyze.ps1): once per run, shown every round ('<' starts the
+# questions over). $null when it fails (then the resources are added by hand).
+function Get-Analysis {
+    if (-not $script:analysis) {
+        Note "looking through $root"
+        try { $script:analysis = & (Join-Path $infra 'analyze.ps1') -Path $root -PassThru }
+        catch { Note "X the analysis failed: $($_.Exception.Message)"; return $null }
+    }
+    $a = $script:analysis
+    Note "$($a.scanned.dotnet) .NET project(s), $($a.scanned.apps) app(s) to deploy"
+    if (-not @($a.resources).Count) { Note 'nothing to suggest: add the resources by hand' }
+    foreach ($r in @($a.resources)) {
+        $line = '{0,-13} {1,-14} {2}' -f $r.kind, $r.key, $r.title
+        if ($r.uses) { $line += "   uses $(@($r.uses) -join ', ')" }
+        Note $line
+    }
+    foreach ($n in @($a.notes)) { Say "    ! $n" 'Yellow' }
+    return $a
+}
+# The analysis's resources, each offered with what it was found from. Adding one asks the usual questions
+# with the analysis's answers as the defaults; one left out (or given another key) is left out of (or
+# renamed in) what the apps after it use.
+function Add-Suggested($Analysis) {
+    $keyOf = @{}
+    foreach ($r in @($Analysis.resources)) {
+        Head "Resources: suggested $($r.kind) $($r.title)"
+        foreach ($e in @($r.evidence)) { Note "found: $e" }
+        if (-not (Confirm-Step "Add $($r.title) ($($r.kind))?")) { $keyOf[[string]$r.key] = $null; Note 'left out'; continue }
+        $spec = $r | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        if ((Get-MapKeys) -contains $spec.key) { $spec.PSObject.Properties.Remove('key') }
+        if ($spec.answers -and $spec.answers.runtime) {
+            $which = 'web'
+            if ($r.kind -eq 'functionApp') { $which = 'function' }
+            $newer = Get-NewerRuntime ([string]$spec.answers.runtime) $which ([string]$spec.answers.hosting)
+            if ($newer) {
+                Say "    ! the project targets $($spec.answers.runtime), which Azure doesn't offer any more: $newer suggested (move the project to it)" 'Yellow'
+                $spec.answers.runtime = $newer
+            }
+        }
+        if ($spec.uses) { $spec.uses = @(@($spec.uses) | ForEach-Object { if ($keyOf.ContainsKey($_)) { $keyOf[$_] } else { $_ } } | Where-Object { $_ }) }
+        if ($spec.roles) {
+            $roles = [ordered]@{}
+            foreach ($q in $spec.roles.PSObject.Properties) {
+                $k = $q.Name
+                if ($keyOf.ContainsKey($k)) { $k = $keyOf[$k] }
+                if ($k) { $roles[$k] = @($q.Value) }
+            }
+            $spec.roles = [pscustomobject]$roles
+        }
+        $keyOf[[string]$r.key] = Add-FromBlueprint ([string]$r.kind) $null $spec
+    }
+}
+
+# A new project: its name and prefix, then its resources: suggested by an analysis of the solution and
+# offered one by one, or from the catalog by hand (or all of them from a spec file: -Init -SpecFile
+# spec.json, see infra/LAZYBICEP.md), then the map and main.bicep.
 function Invoke-Init {
-    Say 'New project: asks its name and prefix, then its resources from the catalog; writes infra.map.json and generates main.bicep. Nothing in Azure changes yet.' 'Cyan'
+    Say 'New project: asks its name and prefix, then its resources (suggested by an analysis of the solution, or from the catalog by hand); writes infra.map.json and generates main.bicep. Nothing in Azure changes yet.' 'Cyan'
     if ($map) { throw 'infra/infra.map.json exists already: -AddResource adds to it (or move it away to start over).' }
     $script:namingChanged = $true
     $p = $null
@@ -2029,6 +2117,15 @@ function Invoke-Init {
         $script:auto = $true
         $p = $script:specData.project
         Note "from $SpecFile"
+    }
+    $suggested = $null
+    if (-not $SpecFile) {
+        Head 'Analysis'
+        $how = 'analyze'
+        if (-not $Analyze) { $how = Select-Option 'Analyze the solution and suggest its resources, or add them by hand' @('analyze', 'manual') 'analyze' }
+        if ($how -eq 'analyze') { $suggested = Get-Analysis }
+        else { Note 'by hand: the resources one by one from the catalog' }
+        if ($suggested) { $p = $suggested.project }
     }
     Head 'Project'
     $default = Split-Path $root -Leaf
@@ -2059,6 +2156,7 @@ function Invoke-Init {
     foreach ($b in $addable) { Note ("{0,-16} {1}" -f $b.kind, $b.about) }
     if ($script:specData) { foreach ($r in @($script:specData.resources)) { [void](Add-FromBlueprint ([string]$r.kind) $null $r) } }
     else {
+        if ($suggested) { Add-Suggested $suggested }
         while ($true) {
             $default = 'done'
             if (@($map.resources).Count -le 2) { $default = 'appService' }

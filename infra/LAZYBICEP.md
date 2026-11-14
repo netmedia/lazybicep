@@ -29,6 +29,7 @@ name alone), `lazybicep` in cmd, or a double-click in Explorer.
 | `azure-setup.ps1` | The setup: asks, checks, creates, removes (every change asked first); adds and removes resources of the map; starts a new project | kit |
 | `lazybicep.ps1` | The terminal UI of the setup | kit |
 | `generate.ps1` | Makes `main.bicep` from the map and the catalog | kit |
+| `analyze.ps1` | Looks through the solution and suggests a new project's resources (a spec) | kit |
 | `catalog/` | The kinds of resources: `<kind>.bicep` (its part of `main.bicep`), `<kind>.json` (what adding it writes into the map), `roles.json` | kit |
 | `modules/` | Bicep modules the catalog uses (a Key Vault's secrets and roles, a database in its server's group) | kit |
 | `route.ps1` | Which environment a workflow run deploys to (from the pushed branch) | kit |
@@ -42,11 +43,43 @@ repository), then:
 ```
 .\infra\lazybicep.ps1                         # New project: n
 .\infra\azure-setup.ps1 -Init                 # the same without the UI
+.\infra\azure-setup.ps1 -Init -Analyze        # analyze the solution without asking first
 .\infra\azure-setup.ps1 -Init -SpecFile spec.json
 ```
 
-It asks the project's name, the prefix of its names (`client-project`, e.g. `nm-myerp`), the region and
-the name of the deployments, then its resources one by one from the catalog: what each needs (a database:
+It asks first: **analyze** the solution, or add the resources **by hand**. The analysis
+(`infra/analyze.ps1`; it reads files, runs nothing) looks through the project's folders, without build
+output, `node_modules` and `infra`:
+
+| Found | Suggests |
+|---|---|
+| A .NET Web project (`Microsoft.NET.Sdk.Web`) | An App Service: its runtime from the target framework, its folder as the source, the health check path from `MapHealthChecks` (none when there is none) |
+| A .NET Functions project (isolated worker) | A Function App (Flex Consumption), its runtime from the target framework |
+| Blazor WebAssembly (not hosted by a web project) | A Static Web App (its workflow's build step to change to `dotnet publish`) |
+| `package.json` with React, Angular, Vue, Svelte, Next, Nuxt, Astro, Vite... | A Static Web App with the folder its build writes (`dist`, `build`, Angular's `outputPath`...); a front end inside a .NET web project (`ClientApp`) is that project's |
+| `package.json` with Express, Nest, Fastify, Koa...; `@azure/functions` | An App Service (Node); a Function App (Node) |
+| Django, Flask, FastAPI; `azure-functions` | An App Service (Python); a Function App (Python) |
+| SQL Server: a connection string, EF Core `SqlServer`, `SqlClient`, `UseSqlServer` | A SQL database per connection string's name (and a SQL server): its key comes from the name, so the setting the map gives the apps, `ConnectionStrings__<Key>`, is the one they read |
+| Service Bus: a package, `ServiceBusTrigger`, `CreateSender`/`CreateProcessor` | A Service Bus with the queues named in the code (`%Setting%` names from `local.settings.json`); Sender or Receiver for an app that only sends or only receives |
+| Storage: a connection string, Blob/Table packages; `QueueTrigger`, `GetQueueClient` | A storage account; a storage queue per name |
+| Key Vault: a vault URL, `AddAzureKeyVault`, the Key Vault packages | A Key Vault for the apps that use it |
+| Application Insights or Azure Monitor | Application Insights for the apps that send telemetry (every app when none does) |
+
+What an app's project references bring counts for it (EF Core in a data library makes the API that
+references it use SQL). Test projects are skipped; workers, consoles, .NET Framework, Service Bus topics,
+Redis, Cosmos DB, PostgreSQL, MySQL, MongoDB, Event Hubs and SignalR are noted (no kind in the catalog).
+
+Then every suggestion is offered with what it was found from (`Add Erp (ErpDb) (sqlDatabase)? [Y/n]`),
+and adding one asks the usual questions with the analysis's answers as the defaults: change anything there.
+One left out (or given another key) is left out of (or renamed in) what the apps after it use. A runtime
+Azure doesn't offer any more (the project targets an old .NET) is suggested as the closest newer one, with
+a warning. After the suggestions, more resources can be added from the catalog as usual.
+`.\infra\analyze.ps1` shows what it would suggest without starting; `-Out spec.json` writes it as a spec
+file to edit and use with `-SpecFile`.
+
+Either way it asks the project's name, the prefix of its names (`client-project`, e.g. `nm-myerp`), the
+region and the name of the deployments. By hand, then its resources one by one from the catalog (after
+the suggestions, the same for more): what each needs (a database:
 which SQL server, or a new one first), which apps use it (each gets its roles and settings), and for an
 app what it uses. Then it writes the map and `naming.json` and generates `main.bicep`. Nothing in Azure
 changes yet: a dry run asks the names of an environment and shows what would be created, a start creates

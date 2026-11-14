@@ -6,7 +6,7 @@
   "web": "https://netmedia.agency",
   "email": "netmedia@netmedia.hr",
   "repository": "https://github.com/netmedia/lazybicep",
-  "files": ["azure-setup.ps1", "lazybicep.ps1", "lazybicep.exe", "generate.ps1", "route.ps1", "catalog", "modules", "LAZYBICEP.md", "kit.json"],
+  "files": ["azure-setup.ps1", "lazybicep.ps1", "lazybicep.exe", "generate.ps1", "analyze.ps1", "route.ps1", "catalog", "modules", "LAZYBICEP.md", "kit.json"],
   "$rootFiles": "Also put into the project's root (the folder above infra), so lazybicep starts from there too: it finds infra/lazybicep.ps1.",
   "rootFiles": ["lazybicep.exe"],
   "projectFiles": ["infra.map.json", "naming.json", "environments", "main.bicep", "README.md"]
