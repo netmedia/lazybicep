@@ -170,7 +170,8 @@ A **spec file** answers all of it (examples/spec.example.json in the LazyBicep r
 
 Per resource: `kind`, `key`, `title`, `answers` (its blueprint's questions), `requires` (`{kind: key}` or
 `"new"`), `users` (the apps that use it), `uses` (for an app: what it uses), `roles` (`{key: [roles]}`
-where a use offers roles). Anything left out takes the blueprint's default.
+where a use offers roles), `namingType` (another naming type of `naming.json`, e.g. `dfunc` for a function app
+with Durable Functions; `analyze.ps1` suggests it). Anything left out takes the blueprint's default.
 
 ## Running it
 
@@ -253,7 +254,7 @@ Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `dep
 | `staticWebApp` | A front end on Static Web Apps (Free or Standard), deployed with its token |
 | `functionApp` | Azure Functions: Flex Consumption (its own plan) or on an App Service plan; state in a storage account through its identity. Runtime: any Azure offers now (default .NET 10 isolated), with a warning when its support ends within a year |
 | `appServicePlan` | A Linux plan (new or shared) |
-| `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first) |
+| `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first), with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo` (the connection's `dbGrants`: the procedures and functions the migrations create) |
 | `serviceBus` | A namespace with queues, no keys; the apps get Data Sender and/or Receiver |
 | `frontDoor` | Azure Front Door Standard or Premium (the CDN) in front of an app of the map (Static Web App, App Service or Function App): one endpoint, HTTPS only, health probes on the app's health check, caching and compression if wanted. A custom domain on it and locking the app to Front Door are by hand for now |
 | `storageQueue` | A queue of a storage account; the apps get a queue role on that queue only |
@@ -294,7 +295,8 @@ and a workflow written by hand is never overwritten):
 | `dotnet`, `project`, `publishArgs`, `test` | .NET: version, the project to publish, extra publish arguments, a test step run before |
 | `node`, `build`, `app`, `api`, `tokenFallback` | Static Web App: Node version, the build step (in `source`), the built site and its functions folders, an extra token secret |
 | `beforeBuild`, `afterDeploy` | The project's own steps (`{ name, id, run, workingDirectory, comment }`), e.g. a version step, a smoke test |
-| `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations") |
+| `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations"). Every app that shares the EF Core model migrates too: the bundle applies only what is pending, so the order of the deploys doesn't matter |
+| `env` | Environment of the build steps only (publish, migration bundle): `{ "TELERIK_NUGET_KEY": "${{ secrets.TELERIK_NUGET_KEY }}" }` for a package feed's key. Never the job's: the deploy actions don't see it |
 
 Where it publishes: the push's branch belongs to an environment (`route.ps1` reads `environments/*.json`), and
 the workflow deploys to that environment's app: its name is the GitHub environment's variable
@@ -302,13 +304,31 @@ the workflow deploys to that environment's app: its name is the GitHub environme
 writes its deploy; removing it deletes its workflow; saving an environment's answers regenerates the
 triggers. Commit `.github/workflows` with the map.
 
-A workflow finds the environment of a push with `route.ps1`:
+A workflow finds the environment of a push with `route.ps1` (the branch and the choice through `env`, never pasted
+into the script: a branch name may hold quotes and semicolons):
 
 ```yaml
 - id: route
   shell: pwsh
-  run: ./infra/route.ps1 -Branch "${{ github.ref_name }}" -Chosen "${{ inputs.environment }}" >> $env:GITHUB_OUTPUT
+  env: { BRANCH: "${{ github.ref_name }}", CHOSEN: "${{ inputs.environment }}" }
+  run: ./infra/route.ps1 -Branch $env:BRANCH -Chosen $env:CHOSEN >> $env:GITHUB_OUTPUT
 ```
+
+A manual run offers production last and preselects the first other environment. One deploy of an app per
+environment runs at a time (`concurrency`). An App Service with a health check path waits after its deploy until
+the app answers it (200, up to 5 minutes), or the run fails: a green deploy means the app started.
+
+**Production deploys from its branch only**: the setup doesn't accept `-` (manual runs) for it. Every deploy
+branch should be protected: the setup offers a repository ruleset (a reviewed pull request for every change, no
+force-push or deletion) when the branch has neither a ruleset nor classic protection. On GitHub plans without
+required reviewers for environments (private repositories below Enterprise) that branch is production's gate.
+
+**The apps run as their environment**: `ASPNETCORE_ENVIRONMENT` (App Service) and `AZURE_FUNCTIONS_ENVIRONMENT`
+(function apps) are the environment's name, capitalized (`{envName}`: `Production`, `Test`, `Staging`...; Linux's disk is
+case-sensitive, so `appsettings.Production.json` loads), so environment-specific settings
+files load and non-production behaviour (mail recipient overrides, no production alerts) applies. An environment
+named `development` makes `IsDevelopment()` true in Azure (developer-only switches, in Netmedia backends also
+migrations on startup): give deployed environments other names.
 
 and signs in to Azure with the GitHub environment's `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID` (OIDC, `azure/login`); each app's name is a variable `AZURE_<KEY>_NAME`, a Static
