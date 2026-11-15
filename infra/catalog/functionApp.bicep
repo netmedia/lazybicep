@@ -2,15 +2,10 @@
 param {{name}} string
 //#if flex
 
-// Where the Flex Consumption app's packages go (a container of {{storageTitle}}).
-resource {{key}}Blobs 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' existing = {
-  parent: {{storage}}
-  name: 'default'
-}
-
+// Where the Flex Consumption app's packages go (a container of {{storageTitle}}). By its full name: an
+// "existing" blob service per app would name the same resource twice when two apps share the storage (BCP121).
 resource {{key}}Packages 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: {{key}}Blobs
-  name: '{{container}}'
+  name: '${{{storage}}.name}/default/{{container}}'
   properties: { publicAccess: 'None' }
 }
 //#end
