@@ -33,7 +33,11 @@ jobs:
           sparse-checkout: infra
       - id: pick
         shell: pwsh
-        run: ./infra/route.ps1 -Branch '${{ github.ref_name }}' -Chosen '${{ inputs.environment }}' | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
+        # Through env, never pasted into the script: a branch name may hold quotes and semicolons.
+        env:
+          BRANCH: ${{ github.ref_name }}
+          CHOSEN: ${{ inputs.environment }}
+        run: ./infra/route.ps1 -Branch $env:BRANCH -Chosen $env:CHOSEN | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
 
   build_and_deploy_job:
     needs: route

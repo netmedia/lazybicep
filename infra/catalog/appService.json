@@ -31,7 +31,7 @@
     "healthCheckPath": "<q.health>",
     "role": "<title> on App Service Linux: managed identity, no FTP or basic-auth publishing",
     "appSettings": [
-      { "name": "ASPNETCORE_ENVIRONMENT", "value": "Production" }
+      { "name": "ASPNETCORE_ENVIRONMENT", "value": "{envName}" }
     ],
     "deploy": { "workflow": "<key>.yml", "name": "<title>", "source": "<q.source>", "project": "<q.source>", "dotnet": "<q.runtime.version>.x" }
   },
