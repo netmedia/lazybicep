@@ -46,11 +46,15 @@ The environment selected at the start (prod, test, stag, dev, accp).
 
 .PARAMETER Keys
 Testing: keys to press instead of the keyboard, comma-separated (Up, Down, Left, Right, Enter, Esc, Tab,
-PgUp, PgDn, Home, End, Back, Space, a single character, text:<chars>, wait:ask, wait:done, snap).
+PgUp, PgDn, Home, End, Back, Space, a single character, text:<chars>, wait:ask, wait:done, stop:done, snap).
 Nothing is drawn on the console; frames go to -Frames.
 
 .PARAMETER Frames
 Testing: a text file that gets the screen (without colours) at every 'snap' and at the end.
+
+.PARAMETER Html
+Testing: a folder that gets every 'snap' (and the end) as an HTML page too, in the terminal's colours
+(docs/tools/screenshots.ps1 makes the guide's screenshots from them).
 
 .PARAMETER Width
 Testing: the screen's width (default 120).
@@ -81,6 +85,7 @@ param(
     [string]$Environment,
     [string]$Keys,
     [string]$Frames,
+    [string]$Html,
     [int]$Width = 0,
     [int]$Height = 0,
     [string]$Engine
@@ -197,7 +202,7 @@ if (Test-Path (Join-Path $infra 'infra.map.json')) { $map = Read-InfraJson 'infr
 $naming = Read-InfraJson 'naming.json'
 if (-not $Engine) { $Engine = Join-Path $infra 'azure-setup.ps1' }
 $defs = @($map.resources | Where-Object { $_ })
-$harness = [bool]($Keys -or $Frames)
+$harness = [bool]($Keys -or $Frames -or $Html)
 
 # --- look -------------------------------------------------------------------------------------------
 
@@ -1392,11 +1397,55 @@ function Get-Size {
     return @(([Console]::WindowWidth - 1), [Console]::WindowHeight)
 }
 function Save-Frame([string]$Why) {
-    if (-not $Frames) { return }
+    if (-not $Frames -and -not $Html) { return }
     $size = Get-Size
     $rows = Draw $size[0] $size[1]
-    $text = "----- $Why -----`n" + ((@($rows | ForEach-Object { (To-Plain $_).TrimEnd() })) -join "`n") + "`n"
-    [IO.File]::AppendAllText($Frames, $text, (New-Object Text.UTF8Encoding $false))
+    if ($Frames) {
+        $text = "----- $Why -----`n" + ((@($rows | ForEach-Object { (To-Plain $_).TrimEnd() })) -join "`n") + "`n"
+        [IO.File]::AppendAllText($Frames, $text, (New-Object Text.UTF8Encoding $false))
+    }
+    if ($Html) {
+        $script:frameNo++
+        New-Item -ItemType Directory -Force -Path $Html | Out-Null
+        $file = Join-Path $Html ('{0:000}-{1}.html' -f $script:frameNo, ($Why -replace '[^\w]+', '-'))
+        [IO.File]::WriteAllText($file, (To-Html $rows), (New-Object Text.UTF8Encoding $false))
+    }
+}
+# A screen as an HTML page in the terminal's colours (the styles' SGR codes as CSS; xterm's 256 colours).
+function Get-Xterm([int]$N) {
+    $base = @('000000', 'cd3131', '0dbc79', 'e5e510', '2472c8', 'bc3fbc', '11a8cd', 'e5e5e5', '666666', 'f14c4c', '23d18b', 'f5f543', '3b8eea', 'd670d6', '29b8db', 'ffffff')
+    if ($N -lt 16) { return '#' + $base[$N] }
+    if ($N -ge 232) { $v = 8 + 10 * ($N - 232); return '#{0:x2}{0:x2}{0:x2}' -f $v }
+    $x = $N - 16
+    $lv = @(0, 95, 135, 175, 215, 255)
+    return '#{0:x2}{1:x2}{2:x2}' -f $lv[[int][Math]::Floor($x / 36)], $lv[[int][Math]::Floor($x / 6) % 6], $lv[$x % 6]
+}
+function Get-Css([string]$Sgr) {
+    $css = @()
+    $p = @($Sgr.Split(';') | Where-Object { $_ -ne '' })
+    for ($i = 0; $i -lt $p.Count; $i++) {
+        switch ($p[$i]) {
+            '1' { $css += 'font-weight:bold' }
+            '4' { $css += 'text-decoration:underline' }
+            '38' { $css += 'color:' + (Get-Xterm ([int]$p[$i + 2])); $i += 2 }
+            '48' { $css += 'background:' + (Get-Xterm ([int]$p[$i + 2])); $i += 2 }
+        }
+    }
+    return $css -join ';'
+}
+function To-Html($Rows) {
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.Append('<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;background:#0c0c0c}pre{margin:0;padding:24px 32px;color:#cccccc;font:18.9px/19.5px Consolas,"Cascadia Mono",monospace}</style></head><body><pre>')
+    foreach ($r in $Rows) {
+        foreach ($seg in @($r)) {
+            if ($null -eq $seg) { continue }
+            $t = [Net.WebUtility]::HtmlEncode([string]$seg.T)
+            if ($seg.S) { [void]$sb.Append("<span style=`"$(Get-Css $seg.S)`">$t</span>") } else { [void]$sb.Append($t) }
+        }
+        [void]$sb.Append("`n")
+    }
+    [void]$sb.Append('</pre></body></html>')
+    return $sb.ToString()
 }
 
 # The Windows console of PowerShell 5.1 shows ANSI colours once asked to (Windows 10 and later).
@@ -1424,6 +1473,9 @@ function Next-TestKey {
     if ($k -eq 'wait:ask') { if ($script:run -and ($script:run.Ask -or $script:run.Done)) { [void]$queue.Dequeue() }; return $null }
     if ($k -eq 'wait:done') { if ($script:run -and $script:run.Done) { [void]$queue.Dequeue() }; return $null }
     [void]$queue.Dequeue()
+    # stop:done: once the run is finished, the rest of the keys aren't pressed (answers given by a loop of
+    # Enter must not start another action on Home).
+    if ($k -eq 'stop:done') { if ($script:run -and $script:run.Done) { $queue.Clear() }; return $null }
     if ($k -eq 'snap') { Save-Frame "snap $($script:screen)"; return $null }
     if ($k.StartsWith('text:')) { foreach ($c in $k.Substring(5).ToCharArray()) { On-Key ([pscustomobject]@{ Name = $null; Char = $c }) }; return $null }
     $names = @('Up', 'Down', 'Left', 'Right', 'Enter', 'Esc', 'Tab', 'PgUp', 'PgDn', 'Home', 'End', 'Back', 'Space', 'CtrlC')
