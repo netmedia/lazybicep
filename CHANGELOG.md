@@ -55,6 +55,10 @@ with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet 
 
 ### Kit
 
+- **The developer guide in Word** (`docs/LazyBicep-Developer-Guide.docx`, Netmedia's document template) and
+  its tools: `docs/tools/screenshots.ps1` makes the guide's UI screenshots from the Contoso Shop demo (the
+  account and subscriptions replaced by demo values), `docs/tools/build-docx.ps1` the Word file (pandoc and
+  Word). lazybicep's test mode: `-Html` (every snap as an HTML page in the terminal's colours), `stop:done`.
 - The tool's files are `lazybicep.ps1` / `.exe` and `LAZYBICEP.md`; `initintoproject.ps1 -Update` removes a
   project's files under the tool's earlier name.
 - `initintoproject.ps1`: a target that isn't an infra folder asks whether to create `<target>\infra`.

@@ -107,6 +107,8 @@ Everything else (the map's fields, the catalog, naming, workflows): [`infra/LAZY
 | `infra/LAZYBICEP.md` | Everything about it: the map, the catalog, the runs, naming, workflows |
 | `examples/spec.example.json` | A new project from a spec: two APIs, a web app, SQL, Service Bus, Key Vault, telemetry |
 | `docs/DEVELOPER-GUIDE.md` | Installing LazyBicep, adding it to a project and every workflow, with diagrams and screenshots |
+| `docs/LazyBicep-Developer-Guide.docx` | The same guide in Word, in Netmedia's document template (`docs/tools/build-docx.ps1` makes it) |
+| `docs/tools/` | `screenshots.ps1` (the guide's UI screenshots, from the Contoso Shop demo) and `build-docx.ps1` |
 | `CHANGELOG.md` | What changed, newest first |
 | `docs/TODO.md` | What is built but not yet run against Azure, and what was left out on purpose |
 | `LICENSE` | MIT |

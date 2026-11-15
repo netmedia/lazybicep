@@ -120,11 +120,15 @@ The `t` toggle is the same as `-RefreshToken`: it re-sets the Static Web App dep
 
 ### Screens
 
-The screenshots come from a demo project (the example spec, "Contoso Shop") running against a test subscription, so names, prices and open items are only examples.
+The screenshots come from a demo project (the example spec, "Contoso Shop") and a dry run of its `test` environment against a test subscription, so names, prices and open items are only examples. `docs/tools/screenshots.ps1` makes them again (the UI driven with keys; read-only in Azure).
 
 **New project** — what you see in an `infra` folder that has no map yet. Press `n`.
 
 ![LazyBicep New project screen](images/tui-new-project.png)
+
+**New project: analyzing the solution** — after the suggested app's usual questions, its configuration: the settings it gets under its own names, the secrets for Key Vault, the values asked per environment. `Space` toggles one, `Enter` takes the picked ones.
+
+![LazyBicep New project offering an app's secrets for Key Vault](images/tui-new-analyze.png)
 
 **Home** — environments and actions on the left; the selected environment's resources, their names and what each connects to on the right.
 
@@ -138,9 +142,9 @@ The screenshots come from a demo project (the example spec, "Contoso Shop") runn
 
 ![LazyBicep dry run asking the App Service plan size](images/tui-run-question.png)
 
-**Run: estimated monthly cost** — every dry run, check and start shows it before touching Azure.
+**Run: estimated monthly cost and the budget** — every dry run, check and start shows the cost before touching Azure; right after it comes the monthly budget question (its default from the estimate).
 
-![LazyBicep dry run showing the estimated monthly cost](images/tui-run-cost.png)
+![LazyBicep dry run showing the estimated monthly cost and asking the monthly budget](images/tui-run-cost.png)
 
 **Run: finished dry run** — `!` marks the steps that still have open items; the log lists them along with the next steps.
 
