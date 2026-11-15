@@ -4,7 +4,7 @@ What changed in LazyBicep, newest first. The kit's version is in `infra/kit.json
 with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet run against Azure:
 [docs/TODO.md](docs/TODO.md).
 
-## Unreleased (on `main` since 2026-11-15)
+## Unreleased (on `develop`, the default branch)
 
 ### New project: from the solution or from Azure
 
@@ -55,12 +55,12 @@ with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet 
 
 ### Kit
 
-- The tool is **LazyBicep** (was LazyAzure): `lazybicep.ps1` / `.exe`, `LAZYBICEP.md`;
-  `initintoproject.ps1 -Update` removes a project's old LazyAzure files.
+- The tool's files are `lazybicep.ps1` / `.exe` and `LAZYBICEP.md`; `initintoproject.ps1 -Update` removes a
+  project's files under the tool's earlier name.
 - `initintoproject.ps1`: a target that isn't an infra folder asks whether to create `<target>\infra`.
 - Fixes: confirmations that lost their last value (`"$x?"` is a variable named `x?` in PowerShell); removing a
   database or an app cleans up what refers to it (migrations, values, secrets, a Front Door's origin).
 
 ## 0.1.0 (2026-10-22)
 
-LazyAzure 0.1.0 by Netmedia: a project's Azure infrastructure from one map, with a terminal UI.
+LazyBicep 0.1.0 by Netmedia: a project's Azure infrastructure from one map, with a terminal UI.
