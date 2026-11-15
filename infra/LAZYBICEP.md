@@ -254,7 +254,7 @@ Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `dep
 | `staticWebApp` | A front end on Static Web Apps (Free or Standard), deployed with its token |
 | `functionApp` | Azure Functions: Flex Consumption (its own plan) or on an App Service plan; state in a storage account through its identity. Runtime: any Azure offers now (default .NET 10 isolated), with a warning when its support ends within a year |
 | `appServicePlan` | A Linux plan (new or shared) |
-| `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first), with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo` (the connection's `dbGrants`: the procedures and functions the migrations create) |
+| `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first), with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo` (the connection's `dbGrants`: the procedures and functions the migrations create). In production a database keeps 35 days of point-in-time restore (Basic: 7, its limit) and long-term backups (weekly 4 weeks, monthly 12 months, yearly 5 years) |
 | `serviceBus` | A namespace with queues, no keys; the apps get Data Sender and/or Receiver |
 | `frontDoor` | Azure Front Door Standard or Premium (the CDN) in front of an app of the map (Static Web App, App Service or Function App): one endpoint, HTTPS only, health probes on the app's health check, caching and compression if wanted. A custom domain on it and locking the app to Front Door are by hand for now |
 | `storageQueue` | A queue of a storage account; the apps get a queue role on that queue only |
@@ -292,9 +292,9 @@ and a workflow written by hand is never overwritten):
 | `source` | The app's folder: a change in it triggers the deploy (`<source>/**`) |
 | `paths` | More paths that trigger it (`"path"` or `{ "path", "comment" }`) |
 | `everyBranch` | Triggered on every branch (its tests run everywhere); deploys still only from an environment's branch. Without it: **the environments' deploy branches** (`environments/*.json`), so a new environment's branch goes into every trigger when its answers are saved |
-| `dotnet`, `project`, `publishArgs`, `test` | .NET: version, the project to publish, extra publish arguments, a test step run before |
+| `dotnet`, `project`, `publishArgs`, `test` | .NET: version, the project to publish, extra publish arguments, a test step run before (a job the deploy needs: a failing test stops the deploy; the step may have `env`, e.g. a feed key) |
 | `node`, `build`, `app`, `api`, `tokenFallback` | Static Web App: Node version, the build step (in `source`), the built site and its functions folders, an extra token secret |
-| `beforeBuild`, `afterDeploy` | The project's own steps (`{ name, id, run, workingDirectory, comment }`), e.g. a version step, a smoke test |
+| `beforeBuild`, `afterDeploy` | The project's own steps (`{ name, id, env, run, workingDirectory, comment }`), e.g. a version step, a smoke test |
 | `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations"). Every app that shares the EF Core model migrates too: the bundle applies only what is pending, so the order of the deploys doesn't matter |
 | `env` | Environment of the build steps only (publish, migration bundle): `{ "TELERIK_NUGET_KEY": "${{ secrets.TELERIK_NUGET_KEY }}" }` for a package feed's key. Never the job's: the deploy actions don't see it |
 
