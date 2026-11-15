@@ -78,6 +78,23 @@ and adding one asks the usual questions with the analysis's answers as the defau
 One left out (or given another key) is left out of (or renamed in) what the apps after it use. A runtime
 Azure doesn't offer any more (the project targets an old .NET) is suggested as the closest newer one, with
 a warning. After the suggestions, more resources can be added from the catalog as usual.
+
+**The apps' configuration.** For each App Service and Function App the analysis also lists every setting
+it reads: its `appsettings*.json`, `local.settings.json` and `.env` (key names left empty count too),
+`Configuration["..."]`, `GetValue`, environment variables and the triggers' `Connection = "..."` names
+(through project references too). Each is sorted:
+
+| Found | Becomes (offered after the app's questions, all picked by default) |
+|---|---|
+| What the map gives already (a SQL connection string by its name, Application Insights) | nothing to do |
+| A trigger's `Connection` (`Sb`), a Service Bus or storage connection string with a key | an app setting under the app's own name, identity-based: `Sb__fullyQualifiedNamespace = {bus.host}`, `Jobs__queueServiceUri = {storage.queueEndpoint}` |
+| A secret: a password, key, token, client secret...; a connection string of something the catalog has no kind for (Redis) | a Key Vault secret you put in (the vault's `secrets`, `by: hand`) and the setting as a Key Vault reference: `Smtp__Password = @Microsoft.KeyVault(VaultName={vault.name};SecretName=Smtp--Password)`; a Key Vault is suggested when there is none |
+| A value that is empty, a placeholder or `localhost` in the files (or only read in the code) | a value asked per environment (the map's `values`): `ExternalApi__BaseUrl = {apiExternalApiBaseUrl}` |
+| Clients made without a credential, a connection string with a key, `CloudStorageAccount` | a warning with the code change: `DefaultAzureCredential` (the map has no keys) |
+
+Only the settings' names leave the files, never their values. A run's next steps list the secrets still
+missing in a vault (`az keyvault secret set ...`) and the apps to restart after them. Removing an app takes
+its values and the secrets only it reads out of the map (Azure keeps the secrets until you delete them).
 `.\infra\analyze.ps1` shows what it would suggest without starting; `-Out spec.json` writes it as a spec
 file to edit and use with `-SpecFile`.
 
@@ -214,10 +231,13 @@ Each resource (in the order asked and saved) has:
 | `tag` | A short label shown with it in lazybicep and in the questions; without one it comes from the map: a choice per environment shows its options (`shared/separate`, or the environment's answer on Home), a `when` resource `only if separate` |
 | `cost` | Its row in the cost estimate (`appServicePlan`, `staticWebApp`, `pennies`, `logs`, `table`) |
 | `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{secret.<name>}`, `{webDomain}`... |
-| `secrets`, `handSecrets` | Key Vault secrets the setup keeps (`by: setup`) or that are put in by hand |
+| `secrets`, `handSecrets` | Key Vault secrets the setup keeps (`by: setup`) or that are put in by hand (`by: hand`; `setting`, `app`: who reads it as what) |
 | `deploy` | An app's deploy (below, "Deploy workflows"): which folder is built how, triggered by what, published where; `generate.ps1` makes its GitHub Actions workflow |
 
-Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `deploy`, `token`),
+`values` (top level): values asked per environment for the apps' settings (`answer`, `param`, `label`,
+`setting`, `app`): saved with the environment's answers, `main.bicep` parameters, `{answer}` in settings.
+
+Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `deploy`, `token`, `origin`),
 `domains`, `github` (variables, deployment tokens, deploy roles, workflows), `live`, `cleanup`, `steps`,
 `removeOrder`.
 

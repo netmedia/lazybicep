@@ -2004,6 +2004,17 @@ function Invoke-RemoveResource {
     foreach ($dm in @($map.domains | Where-Object { $_.resource -eq $k })) { Note "custom domain $($dm.answer)" }
     $map.domains = @($map.domains | Where-Object { $_.resource -ne $k })
     $map.live = @($map.live | Where-Object { $_.resource -ne $k })
+    if ($map.PSObject.Properties['values']) {
+        foreach ($mv in @($map.values | Where-Object { $_ -and $_.app -eq $k })) { Note "value $($mv.answer)" }
+        $map.values = @($map.values | Where-Object { $_ -and $_.app -ne $k })
+    }
+    foreach ($v in @($map.resources | Where-Object { $_.kind -eq 'keyVault' -and $_.secrets })) {
+        $gone = @($v.secrets | Where-Object { $_ -and $_.app -eq $k -and $_.by -eq 'hand' })
+        # A secret another app reads too stays.
+        $gone = @($gone | Where-Object { $n = $_.name; -not @($map.resources | Where-Object { $_.key -ne $k -and @($_.appSettings | Where-Object { $_ -and [string]$_.value -match "SecretName=$([regex]::Escape($n))\)" }).Count }).Count })
+        foreach ($g in $gone) { Note "$($v.key): secret $($g.name) (put in by hand; Azure keeps it until you delete it)" }
+        if ($gone.Count) { $v.secrets = @($v.secrets | Where-Object { $gone -notcontains $_ }) }
+    }
     if (@($script:results | Where-Object { -not $_.Done }).Count) {
         if ($script:ui) { Send ([ordered]@{ t = 'summary'; env = ''; ghEnv = ''; open = @($script:results | Where-Object { -not $_.Done } | ForEach-Object { $_.Text }); code = 1 }) }
         return 1
@@ -2162,8 +2173,81 @@ function Add-Suggested($Analysis, [hashtable]$Known) {
             $spec.roles = [pscustomobject]$roles
         }
         $keyOf[[string]$r.key] = Add-FromBlueprint ([string]$r.kind) $null $spec
+        if ($r.config) { Add-AppConfig $keyOf[[string]$r.key] $r.config $keyOf }
     }
     $script:keyOf = $keyOf
+}
+
+# An app's configuration from the analysis (infra/analyze.ps1): settings under its own names for the map's
+# resources (identity-based: a trigger's Connection...), Key Vault secrets you put in (the app reads them
+# through Key Vault references), values asked per environment; the code changes it needs are shown.
+function Add-AppConfig([string]$AppKey, $Config, [hashtable]$KeyOf) {
+    $app = Get-Def $AppKey
+    if (-not $app) { return }
+    $title = [string]$app.title
+    Head "Configuration of $title"
+    foreach ($w in @($Config.warnings | Where-Object { $_ })) { Say "    ! code: $w" 'Yellow' }
+    $have = @(@($app.appSettings) | Where-Object { $_ } | ForEach-Object { [string]$_.name })
+    # Settings: their {key.value}s follow the keys the resources got (left out: the setting too).
+    $settings = @{}
+    foreach ($x in @($Config.settings | Where-Object { $_ })) {
+        if ($have -contains [string]$x.name) { continue }
+        $v = [string]$x.value
+        $ok = $true
+        foreach ($m in [regex]::Matches($v, '\{(\w+)\.')) {
+            $k = $m.Groups[1].Value
+            if ($KeyOf.ContainsKey($k)) { if ($KeyOf[$k]) { $v = $v.Replace("{$k.", "{$($KeyOf[$k]).") } else { $ok = $false } }
+            elseif (-not (Get-Def $k)) { $ok = $false }
+        }
+        if (-not $ok) { Note "$($x.name): its resource isn't in the map, left out"; continue }
+        Note "setting $($x.name) = $v   ($($x.why))"
+        $settings[[string]$x.name] = $v
+    }
+    if ($settings.Count) {
+        $names = @($settings.Keys | Sort-Object)
+        foreach ($n in @(Select-Many "Settings $title gets under its own names (identity-based)" $names $names)) {
+            $app.appSettings = @(@($app.appSettings) | Where-Object { $_ }) + [pscustomobject][ordered]@{ name = $n; value = $settings[$n] }
+            Note "${AppKey}: setting $n = $($settings[$n])"
+        }
+    }
+    # Secrets: into the vault the app uses (or the map's first), read through Key Vault references.
+    $secrets = @($Config.secrets | Where-Object { $_ -and $have -notcontains [string]$_.setting })
+    if ($secrets.Count) {
+        $vaultKey = [string](@($map.connections | Where-Object { $_.from -eq $AppKey -and (Get-Def $_.to).kind -eq 'keyVault' } | ForEach-Object { $_.to }) | Select-Object -First 1)
+        if (-not $vaultKey) { $vaultKey = [string](@($map.resources | Where-Object { $_.kind -eq 'keyVault' } | ForEach-Object { $_.key }) | Select-Object -First 1) }
+        if (-not $vaultKey) { Note "X $($secrets.Count) secret(s) of $title, but no Key Vault in the map: add one (a), then them by hand" }
+        else {
+            $vault = Get-Def $vaultKey
+            foreach ($x in $secrets) { Note "secret $($x.setting) <- $vaultKey $($x.name)   ($($x.why))" }
+            $names = @($secrets | ForEach-Object { [string]$_.setting })
+            foreach ($n in @(Select-Many "Secrets of $title to keep in $($vault.title) (you put the values in)" $names $names)) {
+                $x = $secrets | Where-Object { $_.setting -eq $n } | Select-Object -First 1
+                if (-not @(@($vault.secrets) | Where-Object { $_ -and $_.name -eq $x.name }).Count) {
+                    Set-Prop $vault 'secrets' (@(@($vault.secrets) | Where-Object { $_ }) + [pscustomobject][ordered]@{ name = [string]$x.name; by = 'hand'; label = [string]$x.path; what = "$($x.path) of $title"; setting = $n; app = $AppKey })
+                }
+                $app.appSettings = @(@($app.appSettings) | Where-Object { $_ }) + [pscustomobject][ordered]@{ name = $n; value = "@Microsoft.KeyVault(VaultName={$vaultKey.name};SecretName=$($x.name))"; about = 'a Key Vault secret you put in' }
+                Note "${AppKey}: setting $n <- Key Vault secret $($x.name) (put in by hand)"
+            }
+            if (-not @($map.connections | Where-Object { $_.from -eq $AppKey -and $_.to -eq $vaultKey }).Count) {
+                Add-Use $AppKey $vaultKey (Get-Blueprint 'keyVault').users (New-Placeholders $vaultKey $vault.title) $null
+            }
+        }
+    }
+    # Values per environment: main.bicep parameters, asked by every run.
+    $values = @($Config.values | Where-Object { $_ -and $have -notcontains [string]$_.setting })
+    if ($values.Count) {
+        foreach ($x in $values) { Note "value $($x.setting): asked per environment   ($($x.why))" }
+        $names = @($values | ForEach-Object { [string]$_.setting })
+        if (-not $map.PSObject.Properties['values']) { Set-Prop $map 'values' @() }
+        foreach ($n in @(Select-Many "Values of $title asked per environment" $names $names)) {
+            $x = $values | Where-Object { $_.setting -eq $n } | Select-Object -First 1
+            $answer = [string]$x.answer
+            for ($i = 2; @(@($map.values) | Where-Object { $_ -and $_.answer -eq $answer }).Count; $i++) { $answer = "$($x.answer)$i" }
+            $map.values = @(@($map.values) | Where-Object { $_ }) + [pscustomobject][ordered]@{ answer = $answer; param = $answer; label = [string]$x.label; setting = $n; app = $AppKey }
+            $app.appSettings = @(@($app.appSettings) | Where-Object { $_ }) + [pscustomobject][ordered]@{ name = $n; value = "{$answer}" }
+            Note "${AppKey}: setting $n = {$answer} (asked per environment)"
+        }
+    }
 }
 
 # Importing from Azure (infra/import.ps1): the subscription, the resource groups, the resources (every one
@@ -2553,6 +2637,13 @@ function Invoke-Setup {
         if ($saved -and $saved.($dm.answer)) { $default = $saved.($dm.answer) }
         $script:choices[$dm.answer] = (Ask $dm.label $default).ToLower()
     }
+    # The apps' values per environment (the map's "values": an external API's address...).
+    foreach ($mv in @($map.values | Where-Object { $_ })) {
+        $default = ''
+        if ($mv.default) { $default = [string]$mv.default }
+        if ($saved -and $null -ne $saved.($mv.answer)) { $default = [string]$saved.($mv.answer) }
+        $script:choices[$mv.answer] = Ask "$($mv.label) (for $envAbbr)" $default
+    }
 
     Head 'GitHub'
     $haveGh = $ghExe -and (Test-Gh @('auth', 'status'))
@@ -2720,6 +2811,7 @@ function Invoke-Setup {
             if ($value -eq '-') { $value = '' }
             $params[$dm.param] = $value
         }
+        foreach ($mv in @($map.values | Where-Object { $_ -and $_.param })) { $params[$mv.param] = [string]$script:choices[$mv.answer] }
         $params.ownerObjectId = $ownerId
         foreach ($k in $secretParams.Keys) { $params[$k] = $secretParams[$k] }
         $parameters = [ordered]@{}
@@ -3079,6 +3171,32 @@ function Invoke-Setup {
         $lines += "  $($hs.reader) reads Key Vault references when it starts (portal: $($hs.reader) -> Environment variables -> Pull reference values)"
         if ($hs.after) { $lines += $hs.after }
         Add-Step (Expand $hs.title) $hs.where $lines
+    }
+    # The same for the apps' secrets from an analysis (a vault without handSecrets): what to put in, then
+    # the apps that read them restarted.
+    foreach ($vdef in @($defs | Where-Object { -not $_.handSecrets -and @($_.secrets | Where-Object { $_ -and $_.by -eq 'hand' }).Count })) {
+        $vres = $script:res[$vdef.key]
+        if (-not $vres -or -not $vres.Name) { continue }
+        $vaultGroupName = $rgName
+        if ($vres.Group) { $vaultGroupName = $vres.Group }
+        $vaultResource = "/subscriptions/$subscription/resourceGroups/$vaultGroupName/providers/$($vdef.armType)/$($vres.Name)"
+        if (-not (Try-Az @('resource', 'show', '--ids', $vaultResource))) { continue }
+        $missingKeys = @($vdef.secrets | Where-Object { $_ -and $_.by -eq 'hand' -and -not (Try-Az @('resource', 'show', '--ids', "$vaultResource/secrets/$($_.name)")) })
+        if (-not $missingKeys.Count) { continue }
+        $lines = @()
+        foreach ($k in $missingKeys) {
+            $lines += "az keyvault secret set --vault-name $($vres.Name) --name $($k.name) --value `"<$($k.label)>`""
+            $lines += "  $($k.what): $($k.app) reads it as $($k.setting)"
+        }
+        foreach ($a in @($missingKeys | ForEach-Object { [string]$_.app } | Where-Object { $_ } | Select-Object -Unique)) {
+            $ad = Get-Def $a
+            if (-not $ad -or -not $script:res[$a] -or -not $script:res[$a].Name) { continue }
+            $cmd = 'webapp'
+            if ($ad.kind -eq 'functionApp') { $cmd = 'functionapp' }
+            $lines += "az $cmd restart -g $rgName -n $($script:res[$a].Name)"
+        }
+        $lines += '  the apps read Key Vault references when they start (until then a missing secret is an empty setting)'
+        Add-Step "Put the apps' secrets into $($vres.Name)" "https://portal.azure.com/#@/resource$vaultResource/secrets" $lines
     }
     if ($steps.Count) {
         Head 'Next steps (by hand)'

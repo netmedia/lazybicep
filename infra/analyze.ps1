@@ -33,6 +33,12 @@ Reads, without running anything:
                             (the queues' names), GetConnectionString (the databases' names),
                             MapHealthChecks (the health check path); through project references too
 
+And per app, its configuration: every setting it reads (settings files, Configuration["..."], GetValue,
+environment variables, triggers' Connection names), sorted into what the map gives it, identity settings
+under the app's own names (a trigger's Connection: <name>__fullyQualifiedNamespace...), secrets for Key
+Vault (by name; values are never read out), values per environment (empty, placeholders or localhost in
+the files) and key-based client code to change (no DefaultAzureCredential).
+
 A database's key comes from its connection string's name, so the setting the map gives the app
 (ConnectionStrings__<Key>) is the one the app reads. infra/azure-setup.ps1 -Init (and lazybicep's New
 project) runs this when asked to analyze, offers every suggestion with what it was found from, and asks
@@ -279,6 +285,8 @@ function New-Project([string]$File, [string]$Lang, [string]$Name) {
         SbSend = (New-Object Collections.ArrayList); SbReceive = (New-Object Collections.ArrayList)
         SqSend = (New-Object Collections.ArrayList); SqReceive = (New-Object Collections.ArrayList)
         Code = (New-Object Collections.ArrayList); Notes = (New-Object Collections.ArrayList); Key = ''; Title = ''
+        AllSettings = (New-Object Collections.ArrayList); ConfigKeys = (New-Object Collections.ArrayList); TriggerConns = (New-Object Collections.ArrayList)
+        Clients = (New-Object Collections.ArrayList); Credential = $false; Config = $null
     }
 }
 function Add-Signal($P, [string]$Signal, [string]$Evidence) {
@@ -375,6 +383,18 @@ foreach ($p in $projects) {
         if ($t -match 'AddAzureKeyVault\(|new SecretClient\(') { Add-Signal $p 'keyVault' "${rel}: $($Matches[0].TrimEnd([char]40))" }
         if ($t -match 'AddApplicationInsightsTelemetry\w*\(|UseAzureMonitor\(|ConfigureFunctionsApplicationInsights\(') { Add-Signal $p 'appInsights' "${rel}: $($Matches[0].TrimEnd([char]40))" }
         if ($t -match 'new BlobServiceClient\(|BlobTrigger\(|new TableServiceClient\(') { Add-Signal $p 'blob' "${rel}: $($Matches[0].TrimEnd([char]40))" }
+        # The settings the code reads, the triggers' connections, how it makes its Azure clients.
+        foreach ($m in [regex]::Matches($t, '(?i)config\w*\s*\[\s*"([^"]+)"\s*\]')) { Add-Unique $p.ConfigKeys $m.Groups[1].Value }
+        foreach ($m in [regex]::Matches($t, '(GetValue<[^>]+>\(|GetEnvironmentVariable\()\s*"([^"]+)"')) { Add-Unique $p.ConfigKeys $m.Groups[2].Value }
+        foreach ($m in [regex]::Matches($t, '\b(ServiceBusTrigger|ServiceBusOutput|QueueTrigger|QueueOutput|BlobTrigger|BlobInput|BlobOutput|TableInput|TableOutput)\(([^)]*)\)')) {
+            $kind = switch -regex ($m.Groups[1].Value) { '^ServiceBus' { 'serviceBus' } '^Queue' { 'queue' } '^Blob' { 'blob' } default { 'table' } }
+            $conn = ''
+            if ($m.Groups[2].Value -match 'Connection\s*=\s*"([^"]+)"') { $conn = $Matches[1] }
+            elseif ($kind -eq 'serviceBus') { $conn = 'AzureWebJobsServiceBus' }
+            if ($conn -and $conn -ne 'AzureWebJobsStorage' -and -not @($p.TriggerConns | Where-Object { $_.Name -eq $conn -and $_.Kind -eq $kind }).Count) { [void]$p.TriggerConns.Add([pscustomobject]@{ Kind = $kind; Name = $conn; Where = "${rel}: $($m.Groups[1].Value)(... Connection = `"$conn`")" }) }
+        }
+        if ($t -match 'DefaultAzureCredential|ManagedIdentityCredential|ChainedTokenCredential|WorkloadIdentityCredential|TokenCredential|AddAzureClients\(') { $p.Credential = $true }
+        foreach ($m in [regex]::Matches($t, 'new (ServiceBusClient|ServiceBusAdministrationClient|BlobServiceClient|BlobContainerClient|QueueServiceClient|QueueClient|TableServiceClient|TableClient)\(|CloudStorageAccount\.Parse')) { Add-Unique $p.Clients "${rel}: $($m.Value.TrimEnd([char]40))" }
     }
 }
 
@@ -456,6 +476,7 @@ foreach ($p in $projects) {
         $leaves = New-Object Collections.ArrayList
         Get-Leaves $j '' $leaves
         foreach ($l in $leaves) {
+            [void]$p.AllSettings.Add([pscustomobject]@{ Path = $l.Path; Value = $l.Value; File = (Split-Path $f -Leaf); Rel = $rel })
             if ($l.Path -match '^Values:(.+)$') { $p.Values[$Matches[1]] = $l.Value }
             # A Function App's own storage: the catalog's functionApp needs a storage account anyway.
             if ($l.Path -match '^Values:(AzureWebJobsStorage|FUNCTIONS_.*|AzureWebJobsDashboard)$') { continue }
@@ -475,6 +496,7 @@ foreach ($p in $projects) {
         foreach ($line in [IO.File]::ReadAllLines($f)) {
             if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { continue }
             $n = $Matches[1]; $v = $Matches[2].Trim().Trim('"', "'")
+            [void]$p.AllSettings.Add([pscustomobject]@{ Path = $n; Value = $v; File = (Split-Path $f -Leaf); Rel = $rel })
             $kind = Get-SettingKind $n $v
             if (-not $kind) { continue }
             $db = ''
@@ -522,6 +544,10 @@ foreach ($a in $apps) {
         foreach ($q in $lib.SqSend) { Add-Unique $a.SqSend $q }
         foreach ($q in $lib.SqReceive) { Add-Unique $a.SqReceive $q }
         if (-not $a.Health -and $lib.Health) { $a.Health = $lib.Health }
+        foreach ($k in $lib.ConfigKeys) { Add-Unique $a.ConfigKeys $k }
+        foreach ($c in $lib.Clients) { Add-Unique $a.Clients "via $($lib.Name): $c" }
+        foreach ($tc in $lib.TriggerConns) { if (-not @($a.TriggerConns | Where-Object { $_.Name -eq $tc.Name -and $_.Kind -eq $tc.Kind }).Count) { [void]$a.TriggerConns.Add($tc) } }
+        if ($lib.Credential) { $a.Credential = $true }
     }
     # %Setting% queue names of a Function: from its local.settings.json.
     foreach ($list in @($a.SbSend, $a.SbReceive, $a.SqSend, $a.SqReceive)) {
@@ -563,6 +589,108 @@ foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'st
     $a.Key = Get-FreeKey (Get-KeyName $base)
     if (-not $a.Title) { $a.Title = $a.Name }
 }
+
+# --- what each app reads from its configuration --------------------------------------------------------
+
+# Every setting an app reads (its settings files and its code), sorted: what the map gives it, an identity
+# setting under the app's own name (a trigger's Connection, a connection string with a key), a secret for
+# Key Vault (only its name is kept, never its value), a value per environment (empty, a placeholder or
+# localhost here), or key-based client code to change. {@kind.value} is the app's resource of that kind,
+# filled in once the resources have their keys.
+$noiseKeys = '^(Logging|AllowedHosts|Kestrel|Serilog|\$schema|IsEncrypted|DetailedErrors|Microsoft|System|ApplicationInsights|Host|NODE_ENV|PORT)(:|$)|^(APPLICATIONINSIGHTS_|ASPNETCORE_|DOTNET_|WEBSITE_|FUNCTIONS_|AzureWebJobs)'
+$secretWords = '(?i)(password|passwd|pwd|secret|apikey|api_key|accesskey|access_key|privatekey|private_key|signingkey|signing_key|clientsecret|client_secret|token|credentials?|(^|[:_.])key)$'
+$placeholder = '(?i)^\s*$|^<.*>$|^(todo|tbd|changeme|change-me|xxx+|your[-_ ].*|replace.*|placeholder|secret|password)$|^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?(/.*)?$'
+$valueKeys = New-Object Collections.Generic.HashSet[string]
+function Get-SecretName([string]$Path) { $n = ($Path -replace '[:_.]+', '--') -replace '[^A-Za-z0-9-]', ''; return $n.Substring(0, [Math]::Min(127, $n.Length)) }
+function Get-AppConfig($A) {
+    $c = [pscustomobject]@{ settings = (New-Object Collections.ArrayList); secrets = (New-Object Collections.ArrayList); values = (New-Object Collections.ArrayList); warnings = (New-Object Collections.ArrayList); provided = (New-Object Collections.ArrayList) }
+    $entries = [ordered]@{}
+    foreach ($s in $A.AllSettings) {
+        $path = [string]$s.Path
+        $file = [string]$s.File
+        if ($file -eq 'local.settings.json') { if ($path -match '^Values:(.+)$') { $path = $Matches[1] } elseif ($path -notmatch '^ConnectionStrings:') { continue } }
+        $path = $path -replace '__', ':'
+        $where = 'base'
+        if ($file -match '^appsettings\.Production\.json$|^\.env\.production$') { $where = 'prod' }
+        elseif ($file -match '^appsettings\.Development\.json$|^local\.settings\.json$|^\.env\.(local|development)$') { $where = 'dev' }
+        elseif ($file -match '^appsettings\..+\.json$|^\.env\..+$') { $where = 'other' }
+        if (-not $entries.Contains($path)) { $entries[$path] = @{ base = $null; dev = $null; prod = $null; other = $null; files = (New-Object Collections.ArrayList) } }
+        $entries[$path][$where] = [string]$s.Value
+        Add-Unique $entries[$path].files "$($s.Rel)"
+    }
+    foreach ($k in $A.ConfigKeys) { if (-not $entries.Contains($k) -and $k -match '^[A-Za-z_][A-Za-z0-9_:.\-]*$') { $entries[$k] = @{ base = $null; dev = $null; prod = $null; other = $null; files = (New-Object Collections.ArrayList); code = $true } } }
+    $triggerNames = @($A.TriggerConns | ForEach-Object { ($_.Name -replace '__', ':') })
+    foreach ($tc in $A.TriggerConns) {
+        $n = ($tc.Name -replace ':', '__')
+        switch ($tc.Kind) {
+            'serviceBus' { [void]$c.settings.Add([pscustomobject]@{ name = "${n}__fullyQualifiedNamespace"; value = '{@serviceBus.host}'; why = "$($tc.Where): the trigger signs in with the app's identity" }) }
+            'queue' { [void]$c.settings.Add([pscustomobject]@{ name = "${n}__queueServiceUri"; value = '{@storage.queueEndpoint}'; why = "$($tc.Where): the trigger signs in with the app's identity" }) }
+            'blob' { [void]$c.settings.Add([pscustomobject]@{ name = "${n}__blobServiceUri"; value = '{@storage.blobEndpoint}'; why = "$($tc.Where): the binding signs in with the app's identity" }) }
+            'table' { [void]$c.settings.Add([pscustomobject]@{ name = "${n}__tableServiceUri"; value = '{@storage.tableEndpoint}'; why = "$($tc.Where): the binding signs in with the app's identity" }) }
+        }
+    }
+    foreach ($path in $entries.Keys) {
+        $e = $entries[$path]
+        if ($path -match $noiseKeys) { continue }
+        if (@($triggerNames | Where-Object { $path -eq $_ -or $path.StartsWith("${_}:") }).Count) { continue }
+        $value = $e.prod
+        if ($null -eq $value) { $value = $e.base }
+        $sample = @($e.prod, $e.base, $e.dev, $e.other | Where-Object { $_ }) | Select-Object -First 1
+        $kind = $null
+        if ($sample) { $kind = Get-SettingKind $path ([string]$sample) }
+        $from = "$((@($e.files)) -join ', ')$(if ($e.code) { 'the code' })"
+        $name = $path -replace ':', '__'
+        $leaf = ($path -split '[:.]')[-1]
+        # A connection string: a database the map gives, else what its value is.
+        if ($path -match '^ConnectionStrings:(.+)$') {
+            $cn = $Matches[1]
+            if ($kind -eq 'sql' -or (-not $kind -and $A.Signals.ContainsKey('sql') -and $A.ConnNames -contains $cn)) { [void]$c.provided.Add("$path (the map's SQL database)"); continue }
+        }
+        if ($kind -eq 'appInsights') { [void]$c.provided.Add("$path (the map's APPLICATIONINSIGHTS_CONNECTION_STRING)"); continue }
+        if ($kind -eq 'serviceBus' -and ($sample -match 'SharedAccessKey' -or $path -match '^ConnectionStrings:')) {
+            [void]$c.settings.Add([pscustomobject]@{ name = "${name}__fullyQualifiedNamespace"; value = '{@serviceBus.host}'; why = "${from}: $path is a connection string with a key" })
+            [void]$c.warnings.Add("$path holds a Service Bus connection string with a key; the map has no keys: read ${name}__fullyQualifiedNamespace with DefaultAzureCredential (new ServiceBusClient(namespace, new DefaultAzureCredential()), or AddAzureClients)")
+            continue
+        }
+        if ($kind -eq 'storage' -and ($sample -match 'AccountKey|UseDevelopmentStorage' -or $path -match '^ConnectionStrings:')) {
+            [void]$c.settings.Add([pscustomobject]@{ name = "${name}__blobServiceUri"; value = '{@storage.blobEndpoint}'; why = "${from}: $path is a storage connection string" })
+            [void]$c.settings.Add([pscustomobject]@{ name = "${name}__queueServiceUri"; value = '{@storage.queueEndpoint}'; why = "${from}: $path is a storage connection string" })
+            [void]$c.warnings.Add("$path holds a storage connection string (a key); the map has no keys: read ${name}__blobServiceUri / __queueServiceUri with DefaultAzureCredential (new BlobServiceClient(uri, new DefaultAzureCredential()))")
+            continue
+        }
+        if ($kind -eq 'keyVault') {
+            $v = '{@keyVault.name}'
+            if ($leaf -match '(?i)ur[il]$' -or $sample -match '^https?://') { $v = 'https://{@keyVault.name}{kvdns}/' }
+            [void]$c.settings.Add([pscustomobject]@{ name = $name; value = $v; why = "${from}: $path is the Key Vault" })
+            continue
+        }
+        if ($sample -match '^@Microsoft\.KeyVault\(') { continue }
+        # A secret: by its name, or a connection string of something the catalog has no kind for.
+        $isSecret = $leaf -match $secretWords -or ($path -match '^ConnectionStrings:' -and $kind -ne 'sql') -or ($sample -match '(?i)(^|;)\s*(password|pwd)\s*=')
+        if ($isSecret) {
+            $what = "$path of $($A.Title)"
+            if ($kind) { $what += " ($($signalNames[$kind]))" }
+            [void]$c.secrets.Add([pscustomobject]@{ name = (Get-SecretName $path); setting = $name; path = $path; why = "${from}: $path" })
+            continue
+        }
+        # A value the app doesn't have for an environment yet (empty, a placeholder, localhost; or only read in the code).
+        $prodOk = $null -ne $e.prod -and $e.prod -notmatch $placeholder
+        $baseOk = $null -ne $e.base -and $e.base -notmatch $placeholder
+        if ($prodOk -or ($baseOk -and $null -eq $e.prod)) { continue }
+        if ($e.code -and -not $e.files.Count) { $why = "the code reads $path; no settings file has it" }
+        elseif ($null -ne $e.base -or $null -ne $e.prod) { $why = "${from}: $path is '$($value)' there" }
+        else { $why = "${from}: $path only for development" }
+        $answer = Get-KeyName "$($A.Key) $path"
+        for ($i = 2; $valueKeys.Contains($answer); $i++) { $answer = (Get-KeyName "$($A.Key) $path") + $i }
+        [void]$valueKeys.Add($answer)
+        [void]$c.values.Add([pscustomobject]@{ answer = $answer; setting = $name; label = "$path of $($A.Title)"; why = $why })
+    }
+    if ($A.Clients.Count -and -not $A.Credential) { [void]$c.warnings.Add("the code makes Azure clients without a credential ($((@($A.Clients | Select-Object -First 3)) -join '; ')): connection strings with keys? With the map's managed identities: DefaultAzureCredential") }
+    if (@($A.Clients | Where-Object { $_ -match 'CloudStorageAccount' }).Count) { [void]$c.warnings.Add('CloudStorageAccount (WindowsAzure.Storage) works with keys only: move to Azure.Storage.* with DefaultAzureCredential') }
+    foreach ($x in $c.secrets) { Add-Signal $A 'keyVault' "$($x.why) (a secret: kept in Key Vault)" }
+    return $c
+}
+foreach ($a in @($apps | Where-Object { @('appService', 'functionApp') -contains $_.Kind })) { $a.Config = Get-AppConfig $a }
 
 # --- the resources they use --------------------------------------------------------------------------
 
@@ -721,7 +849,31 @@ foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'st
     $r = [ordered]@{ kind = $a.Kind; key = $a.Key; title = $a.Title; answers = $answers }
     if ($uses[$a.Key].Count) { $r.uses = @($uses[$a.Key]) }
     if ($roles[$a.Key].Count) { $r.roles = $roles[$a.Key] }
-    $r.evidence = @("$($a.Rel)/$what") + @($a.Notes)
+    $ev = @("$($a.Rel)/$what") + @($a.Notes)
+    if ($a.Config) {
+        $cfg = [ordered]@{}
+        $settings = @()
+        foreach ($x in $a.Config.settings) {
+            $value = [string]$x.value
+            $ok = $true
+            foreach ($m in [regex]::Matches($value, '\{@(\w+)\.')) {
+                $k = $m.Groups[1].Value
+                $res = @($resources | Where-Object { $_.kind -eq $k -and @($uses[$a.Key]) -contains $_.key }) | Select-Object -First 1
+                if (-not $res) { $res = @($resources | Where-Object { $_.kind -eq $k }) | Select-Object -First 1 }
+                if ($res) { $value = $value.Replace("{@$k.", "{$($res.key).") } else { $ok = $false; [void]$a.Config.warnings.Add("$($x.name): no $k in the suggestions for it (add one, then the setting by hand)") }
+            }
+            if ($ok) { $settings += [ordered]@{ name = $x.name; value = $value; why = $x.why } }
+        }
+        if ($settings.Count) { $cfg.settings = @($settings) }
+        if ($a.Config.secrets.Count) { $cfg.secrets = @($a.Config.secrets | ForEach-Object { [ordered]@{ name = $_.name; setting = $_.setting; path = $_.path; why = $_.why } }) }
+        if ($a.Config.values.Count) { $cfg.values = @($a.Config.values | ForEach-Object { [ordered]@{ answer = $_.answer; setting = $_.setting; label = $_.label; why = $_.why } }) }
+        if ($a.Config.warnings.Count) { $cfg.warnings = @($a.Config.warnings) }
+        if ($cfg.Count) {
+            $r.config = $cfg
+            $ev += "configuration: $(@($cfg.settings | Where-Object { $_ }).Count) identity setting(s), $(@($cfg.secrets | Where-Object { $_ }).Count) secret(s) for Key Vault, $(@($cfg.values | Where-Object { $_ }).Count) value(s) per environment, $(@($cfg.warnings | Where-Object { $_ }).Count) code change(s)"
+        }
+    }
+    $r.evidence = $ev
     [void]$resources.Add($r)
 }
 
@@ -780,6 +932,12 @@ foreach ($r in $resources) {
     if ($extra) { Write-Host "                  $extra" -ForegroundColor DarkGray }
     if ($r.uses) { Write-Host "                  uses $($r.uses -join ', ')" -ForegroundColor DarkGray }
     foreach ($e in $r.evidence) { Write-Host "                  - $e" -ForegroundColor DarkGray }
+    if ($r.config) {
+        foreach ($x in @($r.config.settings | Where-Object { $_ })) { Write-Host "                  setting  $($x.name) = $($x.value)" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.secrets | Where-Object { $_ })) { Write-Host "                  secret   $($x.setting) <- Key Vault $($x.name) (you put the value in)" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.values | Where-Object { $_ })) { Write-Host "                  value    $($x.setting) <- asked per environment ($($x.answer))" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.warnings | Where-Object { $_ })) { Write-Host "                  ! $x" -ForegroundColor Yellow }
+    }
 }
 if ($notes.Count) {
     Write-Host ''
