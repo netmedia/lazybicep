@@ -255,6 +255,8 @@ function Get-SizeOptions($Def) { return '[' + ((@($Def.size.options) | ForEach-O
 function Get-Section($Def) {
     $key = [string]$Def.key
     $v = @{ key = $key; name = [string]$Def.param; group = [string]$Def.groupParam; title = [string]$Def.title }
+    # The production environment's name (naming.json), for what only production gets (backups...).
+    $v.productionName = [string]$naming.environments.prod
     $f = @{}
     if ($Def.size) { $v.size = [string]$Def.size.param; $v.sizeOptions = Get-SizeOptions $Def; $v.sizeDefault = [string]$Def.size.default }
     switch ([string]$Def.kind) {
@@ -518,8 +520,8 @@ function Get-YamlValue($Value) {
     if ($t -match '^[0-9]' -or $t -match ': | #' -or $t -match '^[\[\]{}&*!|>''"%@`#,?:-]' -or @('true', 'false', 'null', 'yes', 'no', '~', '') -contains $t.ToLower()) { return Get-YamlQuoted $t }
     return $t
 }
-# A step of the map: { comment, name, if, id, uses, with, workingDirectory, run }; $If on every step of a
-# job that skips when the environment isn't set up.
+# A step of the map: { comment, name, if, id, uses, with, env, workingDirectory, run }; $If on every step of a
+# job that skips when the environment isn't set up. env: the step's environment (e.g. a feed key from a secret).
 function Get-StepYaml($Step, [string]$If) {
     $lines = @()
     foreach ($c in @($Step.comment | Where-Object { $_ })) { $lines += "      # $c" }
@@ -533,6 +535,10 @@ function Get-StepYaml($Step, [string]$If) {
     if ($Step.with) {
         $fields += 'with:'
         foreach ($p in $Step.with.PSObject.Properties) { $fields += "  $($p.Name): $(Get-YamlValue $p.Value)" }
+    }
+    if ($Step.env) {
+        $fields += 'env:'
+        foreach ($p in $Step.env.PSObject.Properties) { $fields += "  $($p.Name): $($p.Value)" }
     }
     if ($Step.workingDirectory) { $fields += "working-directory: $($Step.workingDirectory)" }
     if ($Step.shell) { $fields += "shell: $($Step.shell)" }

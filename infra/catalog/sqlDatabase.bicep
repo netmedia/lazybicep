@@ -15,6 +15,7 @@ module {{key}} 'modules/sql-database.bicep' = {
     sku: {{size}}
     location: location
     tags: tags
+    production: environmentName == '{{productionName}}'
   }
   dependsOn: [{{server}}]
 }
