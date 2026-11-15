@@ -48,7 +48,11 @@ jobs:
           sparse-checkout: infra
       - id: pick
         shell: pwsh
-        run: ./infra/route.ps1 -Branch '${{ github.ref_name }}' -Chosen '${{ inputs.environment }}' | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
+        # Through env, never pasted into the script: a branch name may hold quotes and semicolons.
+        env:
+          BRANCH: ${{ github.ref_name }}
+          CHOSEN: ${{ inputs.environment }}
+        run: ./infra/route.ps1 -Branch $env:BRANCH -Chosen $env:CHOSEN | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
 
   deploy:
     name: Deploy to Azure Functions
@@ -56,6 +60,10 @@ jobs:
     if: needs.route.outputs.environment != ''
     runs-on: ubuntu-latest
     environment: ${{ needs.route.outputs.environment }}
+    # One deploy of this app per environment at a time: an older run can't finish after a newer one.
+    concurrency:
+      group: deploy-{{key}}-${{ needs.route.outputs.environment }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write # OIDC: no stored Azure secret
@@ -74,7 +82,21 @@ jobs:
 {{beforeBuild}}
       - name: Publish
         if: steps.env.outputs.ready
+{{stepEnv}}
         run: dotnet publish {{project}} -c Release{{publishArgs}} -o publish
+//#if migrate
+      # The database first (BA 4.4): the migrations of {{migrateProject}} as a bundle, built before the
+      # Azure login (its token is short-lived) and run against this environment's database before the new
+      # app runs. The connection: the environment's secret {{migrateVar}} when there is one (an older
+      # app with a SQL login), else its variable of that name (Entra ID: Active Directory Default signs
+      # in as the Azure login below).
+      - name: Migration bundle
+        if: steps.env.outputs.ready
+{{stepEnv}}
+        run: |
+          if [ -f .config/dotnet-tools.json ]; then dotnet tool restore; else dotnet tool install --global dotnet-ef{{efVersion}}; fi
+          dotnet ef migrations bundle --project {{migrateProject}} --startup-project {{migrateProject}} --configuration Release --self-contained --target-runtime linux-x64 --output efbundle --force
+//#end
       - uses: {{action:azure-login}}
         if: steps.env.outputs.ready
         with:
@@ -82,15 +104,6 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 //#if migrate
-      # The database first (BA 4.4): the migrations of {{migrateProject}} as a bundle, run against this
-      # environment's database before the new app runs. The connection: the environment's secret
-      # {{migrateVar}} when there is one (an older app with a SQL login), else its variable
-      # of that name (Entra ID: Active Directory Default signs in as the Azure login above).
-      - name: Migration bundle
-        if: steps.env.outputs.ready
-        run: |
-          if [ -f .config/dotnet-tools.json ]; then dotnet tool restore; else dotnet tool install --global dotnet-ef{{efVersion}}; fi
-          dotnet ef migrations bundle --project {{migrateProject}} --startup-project {{migrateProject}} --configuration Release --self-contained --target-runtime linux-x64 --output efbundle --force
       - name: Migrate the database
         if: steps.env.outputs.ready
         env:

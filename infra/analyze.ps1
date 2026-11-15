@@ -356,6 +356,11 @@ foreach ($f in @($all | Where-Object { $_ -match '\.(cs|fs|vb)proj$' })) {
     elseif ($netfx) { $p.Type = 'netfx' }
     elseif ($isFunc) {
         $p.Type = 'functions'; $p.Kind = 'functionApp'; $p.Runtime = "DOTNET-ISOLATED|$($p.Ver)"
+        # Durable Functions: named with the naming type dfunc (Netmedia Azure Conventions 1.2).
+        if (@($pk | Where-Object { $_ -match 'durabletask' }).Count) {
+            $p | Add-Member -NotePropertyName NamingType -NotePropertyValue 'dfunc' -Force
+            [void]$p.Notes.Add('Durable Functions: named as dfunc')
+        }
         if ($pk -contains 'microsoft.net.sdk.functions') { [void]$p.Notes.Add('the in-process model (Microsoft.NET.Sdk.Functions): Flex Consumption runs only the isolated worker; migrate it, or choose hosting "plan"') }
     }
     elseif ($sdk -match 'BlazorWebAssembly') {
@@ -862,6 +867,7 @@ foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'st
     }
     $what = switch ($a.Lang) { 'dotnet' { "$(Split-Path $a.File -Leaf) ($($a.Type)$(if ($a.Ver) { ", .NET $($a.Ver)" }))" } 'node' { "package.json ($($a.Type))" } default { "$(Split-Path $a.File -Leaf) ($($a.Type))" } }
     $r = [ordered]@{ kind = $a.Kind; key = $a.Key; title = $a.Title; answers = $answers }
+    if ($a.PSObject.Properties['NamingType'] -and $a.NamingType) { $r.namingType = $a.NamingType }
     if ($uses[$a.Key].Count) { $r.uses = @($uses[$a.Key]) }
     if ($roles[$a.Key].Count) { $r.roles = $roles[$a.Key] }
     $ev = @("$($a.Rel)/$what") + @($a.Notes)
