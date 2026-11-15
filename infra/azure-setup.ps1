@@ -1081,6 +1081,19 @@ function Grant-DatabaseUser($C) {
                 foreach ($role in $lacking) { Invoke-SqlText $conn "ALTER ROLE [$($role.Replace(']', ']]'))] ADD MEMBER $quoted" }
                 Ok "$label`: $($want -join ', ')"
             } else { Missing "$label`: $($lacking -join ', ')" }
+            # Permissions no role carries: EXECUTE on a schema (the procedures and functions the migrations
+            # create, Netmedia SQL Coding 1.3, 9.1). Only "<PERMISSION> ON SCHEMA::<schema>".
+            foreach ($grant in @($C.dbGrants | Where-Object { $_ })) {
+                if ([string]$grant -notmatch '^([A-Z ]+) ON SCHEMA::(\w+)$') { Missing "${label}: grant '$grant' is not '<PERMISSION> ON SCHEMA::<schema>'"; continue }
+                $permission = $Matches[1].Trim()
+                $schema = $Matches[2]
+                $granted = Get-SqlRows $conn "SELECT p.permission_name FROM sys.database_permissions p JOIN sys.schemas s ON s.schema_id = p.major_id JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id WHERE p.class = 3 AND p.state IN ('G', 'W') AND s.name = '$schema' AND p.permission_name = '$permission' AND u.name = @n" $user
+                if ($granted.Count) { Ok "$label`: $grant" }
+                elseif (Confirm-Step "Grant $user $grant in $($db.Name)?") {
+                    Invoke-SqlText $conn "GRANT $permission ON SCHEMA::[$schema] TO $quoted"
+                    Ok "$label`: $grant"
+                } else { Missing "$label`: $grant" }
+            }
         }
     } catch { Missing "database user ${label}: $($_.Exception.Message)" }
     finally { $conn.Close() }
@@ -1716,8 +1729,15 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
         $ph["q.$($q.id).name"] = $v.Split('|')[0].ToLower()
         $ph["q.$($q.id).version"] = $v.Split('|')[-1]
     }
+    # The naming type: the catalog's, or another type of naming.json a spec names ("namingType": "dfunc" for a
+    # function app with Durable Functions, as analyze.ps1 suggests).
+    $namingType = [string]$bp.naming.type
+    if ($Spec -and $Spec.namingType) {
+        if ($naming.types.([string]$Spec.namingType)) { $namingType = [string]$Spec.namingType }
+        else { Note "X ${newKey}: namingType $($Spec.namingType) is not in naming.json; $namingType kept" }
+    }
     # Its own sub application name (several APIs...): the naming type, or the key when that is taken.
-    $target = [string]$bp.naming.type
+    $target = $namingType
     if (@($map.resources | Where-Object { $_.target -eq $target -or $_.type -eq $target }).Count) { $target = $newKey.ToLower() }
     $ph['target'] = $target
 
@@ -1754,6 +1774,7 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
     }
 
     $entry = Get-Filled $bp.entry $ph $answers
+    if ($namingType -ne [string]$bp.naming.type -and $entry.PSObject.Properties['type']) { $entry.type = $namingType }
     if ($entry.PSObject.Properties['healthCheckPath'] -and $entry.healthCheckPath -eq '-') { $entry.healthCheckPath = '' }
     # The catalog's workflows build .NET: another runtime gets no generated deploy (its workflow by hand).
     if ($entry.deploy -and $entry.deploy.dotnet -and $entry.runtime -and $entry.runtime -notmatch '^DOTNET') {
@@ -2507,7 +2528,16 @@ function Invoke-Init {
     Head 'Resources'
     $addable = @(Get-Blueprints | Where-Object { $_.addable } | Sort-Object kind)
     foreach ($b in $addable) { Note ("{0,-16} {1}" -f $b.kind, $b.about) }
-    if ($script:specData) { foreach ($r in @($script:specData.resources)) { [void](Add-FromBlueprint ([string]$r.kind) $null $r) } }
+    if ($script:specData) {
+        # A spec as it is, its apps' configuration too (settings, Key Vault secrets, values per environment), as
+        # an analysis offers them.
+        $specKeyOf = @{}
+        foreach ($r in @($script:specData.resources)) {
+            $added = Add-FromBlueprint ([string]$r.kind) $null $r
+            $specKeyOf[[string]$r.key] = $added
+            if ($r.config -and $added) { Add-AppConfig $added $r.config $specKeyOf }
+        }
+    }
     else {
         if ($suggested) { Add-Suggested $suggested }
         while ($true) {
@@ -2724,6 +2754,9 @@ function Invoke-Setup {
         if ($envAbbr -eq 'prod') { $default = 'production' }
         if ($saved -and $saved.branch) { $default = $saved.branch }
         $branch = Ask "Branch that deploys to $ghEnv ('-' = manual runs only)" $default
+        # Production deploys from its branch only: with manual runs any branch could deploy there, and on GitHub
+        # plans without required reviewers the branch (protected below) is the environment's only gate.
+        if ($branch -eq '-' -and $envAbbr -eq 'prod') { Note "X $ghEnv deploys from a branch only (e.g. production), not by manual runs of any branch"; if ($script:readOnly) { break }; continue }
         if ($branch -eq '-' -or -not $haveGh -or (Test-Gh @('api', "repos/$repo/branches/$([uri]::EscapeDataString($branch))"))) { break }
         # Copied from another environment: a start can make the branch from that environment's (the same code).
         $base = ''
@@ -3058,6 +3091,30 @@ function Invoke-Setup {
                 if ($policyNames -notcontains $branch) { Invoke-Gh @('api', '-X', 'POST', "repos/$repo/environments/$ghEnv/deployment-branch-policies", '-f', "name=$branch", '-f', 'type=branch') | Out-Null }
                 Ok "${ghEnv}: deployed only from $branch"
             } else { Missing "${ghEnv}: deployment branch $branch" }
+
+            # The deploy branch itself: changed only through a reviewed pull request, no force-push, no
+            # deletion (a repository ruleset, or classic branch protection made by hand). Without it, anyone who
+            # can push could push to it and deploy their code and migrations.
+            if ($branch -ne '-') {
+                $rules = @(Try-Gh @('api', "repos/$repo/rules/branches/$([uri]::EscapeDataString($branch))") -Json | Where-Object { $_ })
+                $classic = Test-Gh @('api', "repos/$repo/branches/$([uri]::EscapeDataString($branch))/protection")
+                if ($classic -or @($rules | Where-Object { $_.type -eq 'pull_request' }).Count) { Ok "${branch}: protected (changes through pull requests)" }
+                elseif (Confirm-Step "Protect $branch with a ruleset (a reviewed pull request for every change, no force-push or deletion)?") {
+                    $ruleset = [ordered]@{
+                        name        = "deploy branch $branch"
+                        target      = 'branch'
+                        enforcement = 'active'
+                        conditions  = @{ ref_name = @{ include = @("refs/heads/$branch"); exclude = @() } }
+                        rules       = @(
+                            @{ type = 'deletion' },
+                            @{ type = 'non_fast_forward' },
+                            @{ type = 'pull_request'; parameters = [ordered]@{ required_approving_review_count = 1; dismiss_stale_reviews_on_push = $true; require_code_owner_review = $false; require_last_push_approval = $true; required_review_thread_resolution = $false } }
+                        )
+                    }
+                    Invoke-Gh @('api', '-X', 'POST', "repos/$repo/rulesets", '--input', (Write-TempJson 'ruleset.json' $ruleset)) | Out-Null
+                    Ok "${branch}: protected by the ruleset 'deploy branch $branch'"
+                } else { Missing "${branch}: not protected (anyone who can push to it deploys to $ghEnv)" }
+            }
 
             $have = @{}
             foreach ($v in @(Try-Gh @('variable', 'list', '--repo', $repo, '--env', $ghEnv, '--json', 'name,value') -Json)) { if ($v) { $have[$v.name] = $v.value } }

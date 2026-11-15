@@ -643,9 +643,10 @@ function Get-MigrationVariable([string]$DatabaseKey) { return 'AZURE_' + ($Datab
 
 function Get-Workflows {
     $out = [ordered]@{}
-    $envNames = @($naming.environments.PSObject.Properties | ForEach-Object { [string]$_.Value })
-    $defaultEnv = [string]$naming.environments.prod
-    if (-not $defaultEnv) { $defaultEnv = $envNames[0] }
+    # A manual run offers production last and never preselects it: deploying there is a choice, not a default.
+    $prodName = [string]$naming.environments.prod
+    $envNames = @(@($naming.environments.PSObject.Properties | ForEach-Object { [string]$_.Value } | Where-Object { $_ -ne $prodName }) + @($prodName | Where-Object { $_ }))
+    $defaultEnv = $envNames[0]
     $envBranches = @(Get-EnvBranches)
     foreach ($d in @($defs | Where-Object { $_.deploy })) {
         $dep = $d.deploy
@@ -682,6 +683,14 @@ function Get-Workflows {
         $v.environments = '[' + ($envNames -join ', ') + ']'
         $v.defaultEnvironment = $defaultEnv
         $v.beforeBuild = ''
+        # The deploy's "env": step environment of the build steps only (publish, migration bundle), e.g. a
+        # package feed's key from a secret - never the whole job's, so the deploy actions don't see it.
+        $v.stepEnv = ''
+        if ($dep.env) {
+            $envLines = @('        env:') + @($dep.env.PSObject.Properties | ForEach-Object { "          $($_.Name): $($_.Value)" })
+            $v.stepEnv = $envLines -join "`n"
+        }
+        $v.healthPath = ''
         $v.afterDeploy = ''
         if ($d.kind -eq 'staticWebApp') {
             $f.node = [bool]$dep.node
@@ -727,6 +736,11 @@ function Get-Workflows {
             $v.afterDeploy = Get-StepsYaml $dep.afterDeploy 'steps.env.outputs.ready'
             # The app that owns the EF Core migrations runs them before it deploys (LAZYBICEP.md, "Database
             # migrations"): the bundle of migrate.project against migrate.database.
+            # App Service: the deploy waits for the app's health check (its healthCheckPath).
+            if ($d.kind -eq 'appService' -and $d.healthCheckPath -and [string]$d.healthCheckPath -ne '-') {
+                $f.health = $true
+                $v.healthPath = [string]$d.healthCheckPath
+            }
             $f.migrate = [bool]$dep.migrate
             if ($dep.migrate) {
                 $m = $dep.migrate
