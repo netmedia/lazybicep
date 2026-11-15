@@ -106,6 +106,10 @@ Everything else (the map's fields, the catalog, naming, workflows): [`infra/LAZY
 | `infra/` | The kit: an empty instance (no map yet) |
 | `infra/LAZYBICEP.md` | Everything about it: the map, the catalog, the runs, naming, workflows |
 | `examples/spec.example.json` | A new project from a spec: two APIs, a web app, SQL, Service Bus, Key Vault, telemetry |
+| `docs/DEVELOPER-GUIDE.md` | Installing LazyBicep, adding it to a project and every workflow, with diagrams and screenshots |
+| `CHANGELOG.md` | What changed, newest first |
+| `docs/TODO.md` | What is built but not yet run against Azure, and what was left out on purpose |
+| `LICENSE` | MIT |
 
 The kit is generic: nothing in it belongs to one project. A project's own files (its map, `naming.json`,
 `environments/`, its README) are made in the project, by `initintoproject` and the New project questions.
