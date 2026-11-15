@@ -58,7 +58,9 @@ map takes them over with their real names, and a start adds what is missing: man
 GitHub deployments) or **new** (the same resources made new by the map's definitions). The analysis: the .NET projects, `package.json` and Python projects
 become the apps, and connection strings, packages and code tell what they use (SQL databases, Service Bus
 and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what
-it was found from; the usual questions follow with its answers as the defaults. Or **by hand**: the
+it was found from; the usual questions follow with its answers as the defaults. It also sorts every
+setting each app reads: identity-based settings under the app's own names, secrets for Key Vault (you put
+the values in), values asked per environment, and the code changes managed identities need. Or **by hand**: the
 project's name, the prefix of its names (`client-project`, e.g. `contoso-shop`), the region, then the resources
 one by one from the catalog. Or answer all of it with a spec file:
 `.\infra\azure-setup.ps1 -Init -SpecFile spec.json` (`examples/spec.example.json`; `.\infra\analyze.ps1

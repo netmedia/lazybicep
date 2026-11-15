@@ -142,6 +142,9 @@ function Get-TokenBicep([string]$Token) {
         if (-not $domain.param) { Fail "{$Token}: the domain has no main.bicep parameter (param)" }
         return [string]$domain.param
     }
+    # A value asked per environment (the map's "values").
+    $value = @($map.values) | Where-Object { $_ -and $_.answer -eq $Token } | Select-Object -First 1
+    if ($value) { return [string]$value.param }
     $parts = $Token.Split('.')
     $d = Get-Def $parts[0]
     if (-not $d -or $parts.Count -ne 2) { Fail "{$Token}: no such resource or value" }
@@ -408,6 +411,11 @@ function Get-Bicep {
         $out.Add('')
         $out.Add("@description('The custom domain of the $($dm.what); empty = none yet.')")
         $out.Add("param $($dm.param) string = ''")
+    }
+    foreach ($mv in @($map.values | Where-Object { $_ -and $_.param })) {
+        $out.Add('')
+        $out.Add("@description($(Get-Quoted "$($mv.label): asked per environment."))")
+        $out.Add("param $($mv.param) string = ''")
     }
     if (@($defs | Where-Object { $_.kind -eq 'keyVault' }).Count) {
         $out.Add('')
