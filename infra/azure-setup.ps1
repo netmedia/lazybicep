@@ -2047,6 +2047,11 @@ function Invoke-RemoveResource {
             Set-Prop $d 'appSettings' $keep
         }
         if ($d.neededBy -and @($d.neededBy) -contains $k) { Set-Prop $d 'neededBy' @(@($d.neededBy) | Where-Object { $_ -ne $k }) }
+        # A deploy that migrated it (deploy.migrate) migrates nothing any more.
+        if ($d.deploy -and $d.deploy.migrate -and [string]$d.deploy.migrate.database -eq $k) {
+            $d.deploy.PSObject.Properties.Remove('migrate')
+            Note "$($d.key): its deploy doesn't migrate $k any more (deploy.migrate)"
+        }
         if ($d.stateStorage -eq $k) { Missing "$($d.key) keeps its state in ${k}: give it another stateStorage first" }
     }
     $map.resources = @($map.resources | Where-Object { $_.key -ne $k })
@@ -2906,6 +2911,15 @@ function Invoke-Setup {
     if ($migrating.Count -and $entra) {
         try { foreach ($dbKey in @($migrating | ForEach-Object { $_.Database } | Select-Object -Unique)) { Grant-DeployDatabaseUser $dbKey $deployApp $entra.appId } }
         finally { Close-SqlFirewall }
+    }
+    # The bundle runs on GitHub's runner (in Azure): a server shared from another group (or imported) doesn't
+    # get main.bicep's AllowAllWindowsAzureIps rule, so it is checked here.
+    foreach ($serverKey in @($migrating | ForEach-Object { $_.Server } | Select-Object -Unique)) {
+        $sres = $script:res[$serverKey]
+        if (-not $sres -or -not $sres.Name -or -not $sres.Group) { continue }
+        $rule = Try-Az @('sql', 'server', 'firewall-rule', 'list', '-g', $sres.Group, '-s', $sres.Name)
+        if (@($rule | Where-Object { $_ -and $_.startIpAddress -eq '0.0.0.0' -and $_.endIpAddress -eq '0.0.0.0' }).Count) { Ok "$($sres.Name) lets Azure services through (the migrations from GitHub's runners)" }
+        else { Missing "$($sres.Name) (shared from $($sres.Group)) doesn't let Azure services through: the migrations from GitHub's runners can't reach it (az sql server firewall-rule create -g $($sres.Group) -s $($sres.Name) -n AllowAllWindowsAzureIps --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0)" }
     }
 
     Head "3. GitHub environment $ghEnv"
