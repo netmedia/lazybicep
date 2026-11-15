@@ -201,6 +201,15 @@ environment (variables, deployment tokens, deployments only from its branch), cu
 free certificates), live checks, and the next steps by hand. Every mode shows the estimated monthly cost
 (Azure list prices).
 
+**A monthly budget** per environment: after the estimate a run asks the budget (default: the estimate with
+room, x1.5 in tens; `-` for none) and who gets its mails (default: you), saved with the answers. The step
+Budget sets `monthly-<environment>` on the environment's resource group (`Microsoft.Consumption/budgets`):
+mails at 80 % and 100 % of the month's spending and when the month's forecast passes it. An alert only:
+nothing is stopped. It is set with the Azure CLI apart from `main.bicep`, so a subscription that doesn't
+offer budgets (some sponsorship and partner offers) only shows the step open; a dry run and a check show the
+budget and what was spent this month; removing the environment deletes it. Answers saved before there was a
+budget: a check says so, a dry run or start asks it.
+
 A **new environment** can start from another one's answers (e.g. test from prod): the first question offers it. Names move to the new environment (`-prod` becomes `-test`, or `-test` is added); custom domains follow the same logic (`dev.app.example.com` -> `test.app.example.com`, `app.example.com` -> `app-test.example.com`); the deploy branch too (`production` -> `test`, `prod` -> `test`, `release/prod` -> `release/test`; anything else: manual runs), and a start offers to create a missing branch from the source's. Shared resources stay shared; every question is still asked, nothing is saved before the usual save.
 
 Idempotent: a second run with the same answers changes nothing. `<` goes back to the previous question

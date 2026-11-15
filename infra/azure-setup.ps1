@@ -319,7 +319,8 @@ function Show-Usage {
     Write-Host ''
     & $b 'A RUN, STEP BY STEP'
     & $d '  0. Answers (saved in infra/environments/<env>.json; Enter keeps the value in'
-    & $d '     brackets, < goes back to change an answer)   1. Azure resources   Database access'
+    & $d '     brackets, < goes back to change an answer; the monthly budget after the cost)'
+    & $d '  1. Azure resources   Database access   Budget (mails at 80 % and 100 %, and forecast)'
     & $d '  2. GitHub -> Azure trust   3. GitHub environment   4. Custom domains   5. Live'
     & $d '  Then the next steps by hand and everything still open.'
     Write-Host ''
@@ -678,6 +679,7 @@ function Write-CostEstimate([string]$Location, [string]$StaticLocation) {
     foreach ($extra in @($map.costExtras)) { if ($extra) { Row $extra 0.0 '' } }
     $total = 0.0
     foreach ($r in $rows) { if ($r.Amount) { $total += [double]$r.Amount } }
+    $script:costTotal = $total # the budget's default (Read-Budget)
     $source = "list prices from prices.azure.com, $Location"
     if (-not $script:pricesLive) { $source = 'prices.azure.com not reachable: West Europe list prices in EUR of 2026-10' }
     $title = "Estimated monthly cost ($Currency; $source)"
@@ -2191,7 +2193,7 @@ function New-BaseMap([string]$Name, [string]$Description, [string]$Region, [stri
         cleanup     = @()
         connections = @()
         steps       = [pscustomobject][ordered]@{
-            setup  = @('Environment', 'Azure CLI', 'Prefix', 'Region', 'Names', 'GitHub', 'Estimated monthly cost', '1. Azure resources', '2. GitHub -> Azure trust', '3. GitHub environment', '4. Custom domains', '5. Live', 'Next steps')
+            setup  = @('Environment', 'Azure CLI', 'Prefix', 'Region', 'Names', 'GitHub', 'Estimated monthly cost', '1. Azure resources', 'Budget', '2. GitHub -> Azure trust', '3. GitHub environment', '4. Custom domains', '5. Live', 'Next steps')
             remove = @('Environment', 'Azure CLI', 'What would be removed', 'Removing', 'Next steps')
         }
         removeOrder = @('microsoft.alertsmanagement/smartDetectorAlertRules', 'Microsoft.Web/certificates', 'Microsoft.Web/serverFarms', 'Microsoft.OperationalInsights/workspaces')
@@ -2584,6 +2586,78 @@ function Invoke-Init {
 
 # --- the setup -------------------------------------------------------------------------------------
 
+# The environment's monthly budget: Azure mails the people given at 80 % and 100 % of it and when the month's
+# forecast passes it. An alert only: nothing is stopped. Asked after the cost estimate (its default: the
+# estimate with room, in tens); '-' for none.
+function Read-Budget($Saved, [string]$Env) {
+    # Answers saved before there was a budget: a check has none; a dry run or start asks it (even when the
+    # saved answers are kept).
+    $hadAuto = $script:auto
+    if ($Saved -and -not $Saved.PSObject.Properties['budget']) {
+        if ($script:mode -eq 'check') { Note 'no budget in the saved answers yet (a dry run or start asks it)'; return [pscustomobject]@{ Amount = '-'; Emails = '' } }
+        $script:auto = $false
+    }
+    try { return Read-BudgetAnswers $Saved $Env } finally { $script:auto = $hadAuto }
+}
+function Read-BudgetAnswers($Saved, [string]$Env) {
+    $default = '-'
+    if ($script:costTotal -gt 0) { $default = [string]([Math]::Max(10, [Math]::Ceiling($script:costTotal * 1.5 / 10) * 10)) }
+    if ($Saved -and $Saved.budget) { $default = [string]$Saved.budget }
+    while ($true) {
+        $amount = Ask "Monthly budget of $Env, in the subscription's billing currency (mails at 80 % and 100 % of it and when the forecast passes it; nothing is stopped; '-' for none)" $default
+        if ($amount -eq '-' -or ($amount -match '^\d+$' -and [int]$amount -gt 0)) { break }
+        Note 'X a whole amount (e.g. 150), or -'
+    }
+    $emails = ''
+    if ($amount -ne '-') {
+        $default = [string]$script:vals['me']
+        if ($Saved -and $Saved.budgetEmails) { $default = [string]$Saved.budgetEmails }
+        while ($true) {
+            $emails = Ask "Who gets the budget's mails (comma-separated)" $default
+            $list = @($emails.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($list.Count -and -not @($list | Where-Object { $_ -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' }).Count) { $emails = $list -join ', '; break }
+            Note 'X e-mail addresses, comma-separated'
+        }
+    }
+    return [pscustomobject]@{ Amount = $amount; Emails = $emails }
+}
+# The budget on the environment's resource group (Microsoft.Consumption/budgets, monthly-<environment>): set
+# with the Azure CLI, apart from main.bicep, so a subscription that doesn't offer budgets doesn't stop the
+# deployment. A dry run and a check show it and the month's spending; a start sets it, asked first.
+function Get-BudgetUrl([string]$Subscription, [string]$Group, [string]$GhEnv) {
+    return "https://management.azure.com/subscriptions/$Subscription/resourceGroups/$Group/providers/Microsoft.Consumption/budgets/monthly-$($GhEnv)?api-version=2023-11-01"
+}
+function Set-Budget($Budget, [string]$Subscription, [string]$Group, [string]$GhEnv) {
+    $url = Get-BudgetUrl $Subscription $Group $GhEnv
+    $have = Try-Az @('rest', '--method', 'get', '--url', $url)
+    if ($have -and $have.properties.currentSpend) { Note ("spent this month: {0:0.00} {1}$(if ($have.properties.forecastSpend) { '; forecast {2:0.00}' })" -f [double]$have.properties.currentSpend.amount, $have.properties.currentSpend.unit, [double]$have.properties.forecastSpend.amount) }
+    if ($Budget.Amount -eq '-') {
+        if ($have) { Note "monthly-$GhEnv ($($have.properties.amount)) is there, but the answers have none: kept (delete it in the portal if it isn't wanted)" }
+        else { Note 'no budget (the answers: -)' }
+        return
+    }
+    $emails = @($Budget.Emails.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $haveEmails = @()
+    if ($have -and $have.properties.notifications) { $haveEmails = @($have.properties.notifications.PSObject.Properties | ForEach-Object { @($_.Value.contactEmails) } | Select-Object -Unique) }
+    $same = $have -and [double]$have.properties.amount -eq [double]$Budget.Amount -and -not (Compare-Object @($haveEmails | Sort-Object) @($emails | Sort-Object))
+    if ($same) { Ok "budget monthly-$GhEnv`: $($Budget.Amount) a month, mails to $($emails -join ', ')"; return }
+    $what = "monthly budget of $Group`: $($Budget.Amount)$(if ($have) { " (now $($have.properties.amount))" }), mails to $($emails -join ', ') at 80 % and 100 % and when the forecast passes it"
+    if ($script:readOnly) { Missing $what; return }
+    if (-not (Confirm-Step "Set the $($what)?")) { Missing $what; return }
+    # The first month: an existing budget's (it can't move), else this one.
+    $start = (Get-Date).ToUniversalTime().ToString('yyyy-MM-01T00:00:00Z')
+    if ($have -and $have.properties.timePeriod.startDate) { $start = [string]$have.properties.timePeriod.startDate }
+    $notify = [ordered]@{}
+    foreach ($n in @(@('actual80', 80, 'Actual'), @('actual100', 100, 'Actual'), @('forecast100', 100, 'Forecasted'))) {
+        $notify[$n[0]] = [ordered]@{ enabled = $true; operator = 'GreaterThanOrEqualTo'; threshold = $n[1]; thresholdType = $n[2]; contactEmails = @($emails) }
+    }
+    $body = [ordered]@{ properties = [ordered]@{ category = 'Cost'; amount = [int]$Budget.Amount; timeGrain = 'Monthly'; timePeriod = @{ startDate = $start }; notifications = $notify } }
+    try {
+        Invoke-Az @('rest', '--method', 'put', '--url', $url, '--body', "@$(Write-TempJson 'budget.json' $body)") | Out-Null
+        Ok "budget monthly-$GhEnv`: $($Budget.Amount) a month, mails to $($emails -join ', ')"
+    } catch { Missing "budget: Azure refused it (some subscriptions don't offer budgets): $(($_.Exception.Message -split "`n")[-1])" }
+}
+
 function Invoke-Setup {
     if (-not $script:replaying) {
         switch ($script:mode) {
@@ -2790,6 +2864,9 @@ function Invoke-Setup {
         if ($res.Name -or -not $def.optional) { $names[$def.key] = $res.Name }
         if ($def.groupParam) { $groups[$def.key] = $res.Group }
     }
+    # The estimate first: the monthly budget's default comes from it.
+    Write-CostEstimate $location $staticLocation
+    $budget = Read-Budget $saved $envAbbr
     $answers = [ordered]@{
         subscriptionId = $subscription
         location       = $location
@@ -2798,12 +2875,13 @@ function Invoke-Setup {
         subs           = $script:subs
         repo           = $repo
         branch         = $branch
+        budget         = $budget.Amount
+        budgetEmails   = $budget.Emails
     }
     foreach ($k in $script:choices.Keys) { $answers[$k] = $script:choices[$k] }
     $answers.names = $names
     $answers.groups = $groups
     $answers = Get-OrderedLike $answers $saved
-    Write-CostEstimate $location $staticLocation
 
     $newJson = ConvertTo-Json -InputObject $answers -Depth 10 -Compress
     $oldJson = ''
@@ -2836,7 +2914,7 @@ function Invoke-Setup {
 
     $haveRg = $rgExists
     if ($haveRg) { Ok "resource group $rgName ($location)" }
-    elseif (Confirm-Step "Create the resource group $rgName in $location?") {
+    elseif (Confirm-Step "Create the resource group $rgName in $($location)?") {
         Invoke-Az @('group', 'create', '-n', $rgName, '-l', $location, '--tags', "project=$project", "environment=$ghEnv") | Out-Null
         $haveRg = $true
         Ok "resource group $rgName created ($location)"
@@ -2980,6 +3058,9 @@ function Invoke-Setup {
         Head 'Database access'
         try { foreach ($c in $sqlLinks) { Grant-DatabaseUser $c } } finally { Close-SqlFirewall }
     }
+
+    Head 'Budget'
+    Set-Budget $budget $subscription $rgName $ghEnv
 
     Head '2. GitHub -> Azure trust (OIDC)'
     $deployDef = $defs | Where-Object { $_.ask -eq 'name' -and $_.type -eq 'deploy' } | Select-Object -First 1
@@ -3151,7 +3232,7 @@ function Invoke-Setup {
                     if ($present) { $verb = 'Replace' }
                     $why = ''
                     if ($present -and -not $t.Existed) { $why = ' (the Static Web App is new)' }
-                    if (Confirm-Step "$verb $($t.Name) from $($t.App)$why?") {
+                    if (Confirm-Step "$verb $($t.Name) from $($t.App)$($why)?") {
                         Invoke-Gh @('secret', 'set', $t.Name, '--repo', $repo, '--env', $ghEnv, '--body', $t.Token) | Out-Null
                         Ok "$($t.Name) set"
                     } else { Missing $t.Name }
@@ -3492,6 +3573,10 @@ function Invoke-Remove {
             Note "deleting resource group $rgName (a few minutes)..."
             Invoke-Az @('group', 'delete', '-n', $rgName, '--yes') | Out-Null
             Ok "resource group $rgName deleted"
+            if ($saved.budget -and $saved.budget -ne '-') {
+                $r = Invoke-Native 'az' @('rest', '--method', 'delete', '--url', (Get-BudgetUrl $saved.subscriptionId $rgName $ghEnv), '--only-show-errors')
+                if ($r.Code -eq 0) { Ok "budget monthly-$ghEnv deleted" }
+            }
             foreach ($def in $defs) { if ($saved.names.($def.key) -and -not ($saved.groups -and $saved.groups.($def.key)) -and $def.ask -ne 'name') { Mark $def.key $saved.names.($def.key) 'gone' '' } }
         } elseif ($ours.Count) {
             # In the map's removeOrder: apps before their plan, the plan and the workspace last.
