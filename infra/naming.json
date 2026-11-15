@@ -40,6 +40,7 @@
     "apiapp": 60,
     "statapp": 40,
     "func": 60,
+    "dfunc": 60,
     "store": 24,
     "kv": 24,
     "logs": 63,

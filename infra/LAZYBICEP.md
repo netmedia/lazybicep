@@ -324,7 +324,8 @@ force-push or deletion) when the branch has neither a ruleset nor classic protec
 required reviewers for environments (private repositories below Enterprise) that branch is production's gate.
 
 **The apps run as their environment**: `ASPNETCORE_ENVIRONMENT` (App Service) and `AZURE_FUNCTIONS_ENVIRONMENT`
-(function apps) are the environment's name (`production`, `test`, `staging`...), so environment-specific settings
+(function apps) are the environment's name, capitalized (`{envName}`: `Production`, `Test`, `Staging`...; Linux's disk is
+case-sensitive, so `appsettings.Production.json` loads), so environment-specific settings
 files load and non-production behaviour (mail recipient overrides, no production alerts) applies. An environment
 named `development` makes `IsDevelopment()` true in Azure (developer-only switches, in Netmedia backends also
 migrations on startup): give deployed environments other names.

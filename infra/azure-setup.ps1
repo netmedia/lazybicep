@@ -1733,7 +1733,12 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
     # function app with Durable Functions, as analyze.ps1 suggests).
     $namingType = [string]$bp.naming.type
     if ($Spec -and $Spec.namingType) {
-        if ($naming.types.([string]$Spec.namingType)) { $namingType = [string]$Spec.namingType }
+        if ($naming.types.([string]$Spec.namingType)) {
+            $namingType = [string]$Spec.namingType
+            # Its length limit: the catalog type's, when naming.json has none for it.
+            $base = [string]$bp.naming.type
+            if (-not $naming.maxLength.$namingType -and $naming.maxLength.$base) { Set-Prop $naming.maxLength $namingType ([int]$naming.maxLength.$base); $script:namingChanged = $true }
+        }
         else { Note "X ${newKey}: namingType $($Spec.namingType) is not in naming.json; $namingType kept" }
     }
     # Its own sub application name (several APIs...): the naming type, or the key when that is taken.
@@ -2621,6 +2626,7 @@ function Invoke-Setup {
     $script:vals['env'] = $envAbbr
     $script:vals['kvdns'] = '.vault.azure.net' # environment().suffixes.keyvaultDns in Azure's public cloud
     $script:vals['ghEnv'] = $ghEnv
+    $script:vals['envName'] = $ghEnv.Substring(0, 1).ToUpper() + $ghEnv.Substring(1) # Production (main.bicep: the same)
     $envFile = Join-Path $infra "environments\$envAbbr.json"
     $script:saved = Read-Json $envFile
     $saved = $script:saved
@@ -3099,20 +3105,25 @@ function Invoke-Setup {
                 $rules = @(Try-Gh @('api', "repos/$repo/rules/branches/$([uri]::EscapeDataString($branch))") -Json | Where-Object { $_ })
                 $classic = Test-Gh @('api', "repos/$repo/branches/$([uri]::EscapeDataString($branch))/protection")
                 if ($classic -or @($rules | Where-Object { $_.type -eq 'pull_request' }).Count) { Ok "${branch}: protected (changes through pull requests)" }
-                elseif (Confirm-Step "Protect $branch with a ruleset (a reviewed pull request for every change, no force-push or deletion)?") {
+                elseif (Confirm-Step "Protect $branch with a ruleset (a reviewed pull request for every change, no force-push or deletion; the repository's admins may bypass it)?" -DefaultNo:($envAbbr -ne 'prod')) {
                     $ruleset = [ordered]@{
                         name        = "deploy branch $branch"
                         target      = 'branch'
                         enforcement = 'active'
                         conditions  = @{ ref_name = @{ include = @("refs/heads/$branch"); exclude = @() } }
+                        # The admins (role 5) may bypass it: a team of one can still merge its own pull requests.
+                        bypass_actors = @(@{ actor_id = 5; actor_type = 'RepositoryRole'; bypass_mode = 'always' })
                         rules       = @(
                             @{ type = 'deletion' },
                             @{ type = 'non_fast_forward' },
                             @{ type = 'pull_request'; parameters = [ordered]@{ required_approving_review_count = 1; dismiss_stale_reviews_on_push = $true; require_code_owner_review = $false; require_last_push_approval = $true; required_review_thread_resolution = $false } }
                         )
                     }
-                    Invoke-Gh @('api', '-X', 'POST', "repos/$repo/rulesets", '--input', (Write-TempJson 'ruleset.json' $ruleset)) | Out-Null
-                    Ok "${branch}: protected by the ruleset 'deploy branch $branch'"
+                    # GitHub may refuse it (rulesets of a private repository need a paid plan): reported, the run goes on.
+                    try {
+                        Invoke-Gh @('api', '-X', 'POST', "repos/$repo/rulesets", '--input', (Write-TempJson 'ruleset.json' $ruleset)) | Out-Null
+                        Ok "${branch}: protected by the ruleset 'deploy branch $branch'"
+                    } catch { Missing "${branch}: GitHub refused the ruleset ($($_.Exception.Message)); protect it by hand (Settings -> Rules)" }
                 } else { Missing "${branch}: not protected (anyone who can push to it deploys to $ghEnv)" }
             }
 

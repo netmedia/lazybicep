@@ -132,6 +132,8 @@ function Fail([string]$Text) { throw "infra.map.json: $Text" }
 function Get-TokenBicep([string]$Token) {
     if ($Token -eq 'kvdns') { return 'environment().suffixes.keyvaultDns' }
     if ($Token -eq 'env') { return 'environmentName' }
+    # The environment's name capitalized (Production): appsettings.Production.json on Linux's case-sensitive disk.
+    if ($Token -eq 'envName') { return "'`${toUpper(substring(environmentName, 0, 1))}`${substring(environmentName, 1)}'" }
     if ($Token.StartsWith('secret.')) {
         $name = $Token.Substring(7)
         foreach ($d in $defs) { foreach ($s in @($d.secrets)) { if ($s -and $s.name -eq $name -and $s.param) { return [string]$s.param } } }

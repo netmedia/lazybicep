@@ -129,7 +129,11 @@ jobs:
           url="https://$host{{healthPath}}"
           for attempt in $(seq 1 30); do
             code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$url" || true)
-            if [ "$code" = "200" ]; then echo "$url: 200"; exit 0; fi
+            case "$code" in
+              2??) echo "$url: $code"; exit 0 ;;
+              # Up but not open to the runner (Easy Auth, locked to Front Door): it answers, that's enough here.
+              401|403|302|307) echo "::warning::$url answered $code: the app is up, but the runner can't see its health check"; exit 0 ;;
+            esac
             sleep 10
           done
           echo "::error::$url answered $code after 5 minutes"; exit 1
