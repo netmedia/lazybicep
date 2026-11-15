@@ -31,7 +31,10 @@ Reads, without running anything:
   local.settings.json, .env Application Insights, Key Vault (Redis, Cosmos DB, PostgreSQL... are noted)
   packages and code         EF Core / SqlClient, Azure SDKs, ServiceBusTrigger / QueueTrigger / senders
                             (the queues' names), GetConnectionString (the databases' names),
-                            MapHealthChecks (the health check path); through project references too
+                            MapHealthChecks (the health check path, also from a constant of the same
+                            file); through project references too. A function app is a project with
+                            AzureFunctionsVersion or the Functions SDK; a library that only references
+                            the worker packages is not one
 
 And per app, its configuration: every setting it reads (settings files, Configuration["..."], GetValue,
 environment variables, triggers' Connection names), sorted into what the map gives it, identity settings
@@ -341,8 +344,14 @@ foreach ($f in @($all | Where-Object { $_ -match '\.(cs|fs|vb)proj$' })) {
     }
     $pk = @($p.Packages | ForEach-Object { $_.ToLower() })
     $isTest = (Get-XmlValue $proj 'IsTestProject') -eq 'true' -or @($pk | Where-Object { $_ -match '^(microsoft\.net\.test\.sdk|xunit.*|nunit.*|mstest.*)$' }).Count
-    $isFunc = (Get-XmlValue $proj 'AzureFunctionsVersion') -or @($pk | Where-Object { $_ -match '^(microsoft\.azure\.functions\.worker.*|microsoft\.net\.sdk\.functions)$' }).Count
     $exe = (Get-XmlValue $proj 'OutputType') -match 'exe'
+    # A function app: AzureFunctionsVersion, or the Functions SDK (isolated worker or in-process), or worker
+    # packages in an executable or next to host.json. A library that only references the worker packages
+    # (shared middleware, telemetry helpers) is not one.
+    $workerPackages = @($pk | Where-Object { $_ -match '^microsoft\.azure\.functions\.worker' }).Count
+    $isFunc = (Get-XmlValue $proj 'AzureFunctionsVersion') -or
+        ($pk -contains 'microsoft.azure.functions.worker.sdk') -or ($pk -contains 'microsoft.net.sdk.functions') -or
+        ($workerPackages -and ($exe -or (Test-Path (Join-Path $p.Dir 'host.json'))))
     if ($isTest) { $p.Type = 'test' }
     elseif ($netfx) { $p.Type = 'netfx' }
     elseif ($isFunc) {
@@ -379,6 +388,12 @@ foreach ($p in $projects) {
         foreach ($m in [regex]::Matches($t, '(QueueOutput\(|GetQueueClient\()\s*"([^"]+)"')) { Add-Unique $p.SqSend $m.Groups[2].Value; Add-Signal $p 'queue' "${rel}: $($m.Groups[1].Value)`"$($m.Groups[2].Value)`")" }
         foreach ($m in [regex]::Matches($t, '(GetConnectionString\(\s*"|ConnectionStrings:)([A-Za-z0-9_.\-]+)')) { Add-Unique $p.ConnNames $m.Groups[2].Value }
         foreach ($m in [regex]::Matches($t, '(MapHealthChecks|UseHealthChecks)\(\s*"([^"]+)"')) { if (-not $p.Health) { $p.Health = $m.Groups[2].Value } }
+        # The path as a constant or field of the same file: MapHealthChecks(HealthCheckPath).
+        foreach ($m in [regex]::Matches($t, '(MapHealthChecks|UseHealthChecks)\(\s*([A-Za-z_]\w*)\s*[,)]')) {
+            if ($p.Health) { break }
+            $c = [regex]::Match($t, '\b' + [regex]::Escape($m.Groups[2].Value) + '\s*=\s*"([^"]+)"')
+            if ($c.Success) { $p.Health = $c.Groups[1].Value }
+        }
         if ($t -match 'UseSqlServer\(|UseAzureSql\(|new SqlConnection\(') { Add-Signal $p 'sql' "${rel}: $($Matches[0].TrimEnd([char]40))" }
         if ($t -match 'AddAzureKeyVault\(|new SecretClient\(') { Add-Signal $p 'keyVault' "${rel}: $($Matches[0].TrimEnd([char]40))" }
         if ($t -match 'AddApplicationInsightsTelemetry\w*\(|UseAzureMonitor\(|ConfigureFunctionsApplicationInsights\(') { Add-Signal $p 'appInsights' "${rel}: $($Matches[0].TrimEnd([char]40))" }
