@@ -27,6 +27,9 @@ These need an Azure sign-in and a real terminal; they were tested offline only (
 - [ ] **An imported environment's first dry run (connect).** `environments/<env>.json` marked `imported`:
       every question asked once with the real names as defaults; the what-if should find the resources as
       existing and show only what the kit adds (identities, roles, settings, security).
+- [ ] **The monthly budget.** A start sets `monthly-<environment>` on the environment's resource group; check
+      that it appears (Cost Management -> Budgets) with the three alerts, that a second run reports it as set,
+      and what a subscription without budgets says (the MPN one may be such).
 
 ## Left out on purpose (later)
 
