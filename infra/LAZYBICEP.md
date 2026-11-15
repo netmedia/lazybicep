@@ -318,8 +318,14 @@ The setup does the rest, each step asked:
 
 The bundle reads the connection from the environment variable `ConnectionStrings__<connection>`, and runs on the
 GitHub runner without the solution's files: the project's design-time factory must not require them (Netmedia's
-`DesignTimeDbContextFactoryBase` treats `solutionsettings.json` as optional). The SQL server lets Azure services
-through, and GitHub's hosted runners run in Azure. Other apps deploy on their own, possibly before the migration:
+`DesignTimeDbContextFactoryBase` treats `solutionsettings.json` as optional). GitHub's hosted runners run in
+Azure: a SQL server the setup makes lets Azure services through (`AllowAllWindowsAzureIps`); one shared from
+another resource group (or imported) keeps its own firewall, so a run checks it and shows the command when the
+rule is missing. The `dotnet-ef` that builds the bundle is the project's EF Core version (its
+`PackageReference` or `Directory.Packages.props`; else the app's .NET major), or the repository's tool
+manifest (`.config/dotnet-tools.json`) when there is one. A push that changes only the migrations' project
+deploys too (it is in the workflow's paths). Removing the database from the map takes the deploy's `migrate`
+out. Other apps deploy on their own, possibly before the migration:
 make breaking schema changes in two steps, expand then contract (Netmedia SQL Coding 10.4), so old and new code
 both work with the database in between.
 
