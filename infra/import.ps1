@@ -201,6 +201,7 @@ $kindOf = @{
     'microsoft.web/sites' = 'site'; 'microsoft.web/serverfarms' = 'appServicePlan'; 'microsoft.web/staticsites' = 'staticWebApp'
     'microsoft.sql/servers' = 'sqlServer'; 'microsoft.servicebus/namespaces' = 'serviceBus'; 'microsoft.storage/storageaccounts' = 'storage'
     'microsoft.keyvault/vaults' = 'keyVault'; 'microsoft.insights/components' = 'appInsights'; 'microsoft.operationalinsights/workspaces' = 'logAnalytics'
+    'microsoft.appconfiguration/configurationstores' = 'appConfiguration'
 }
 # What comes with other resources (Application Insights' smart detection, App Service's certificates...).
 $withOthers = @('microsoft.cdn/profiles/afdendpoints', 'microsoft.cdn/profiles/endpoints', 'microsoft.insights/actiongroups', 'microsoft.alertsmanagement/smartdetectoralertrules', 'microsoft.web/certificates', 'microsoft.insights/metricalerts', 'microsoft.portal/dashboards', 'microsoft.web/connections')
@@ -319,7 +320,7 @@ function Get-FreeKey([string]$Want) {
     [void]$script:keys.Add($k)
     return $k
 }
-$keyDefaults = @{ frontDoor = 'cdn'; appService = 'api'; functionApp = 'func'; staticWebApp = 'web'; appServicePlan = 'plan'; sqlServer = 'sqlServer'; sqlDatabase = 'db'; serviceBus = 'bus'; storage = 'storage'; storageQueue = 'queue'; keyVault = 'vault'; appInsights = 'insights'; logAnalytics = 'workspace' }
+$keyDefaults = @{ appConfiguration = 'appConfig'; frontDoor = 'cdn'; appService = 'api'; functionApp = 'func'; staticWebApp = 'web'; appServicePlan = 'plan'; sqlServer = 'sqlServer'; sqlDatabase = 'db'; serviceBus = 'bus'; storage = 'storage'; storageQueue = 'queue'; keyVault = 'vault'; appInsights = 'insights'; logAnalytics = 'workspace' }
 function Get-KeyFor([string]$Kind, [string]$Name, [switch]$Child) {
     $base = ''
     if ($Child) { $base = Get-KeyName $Name }
@@ -349,7 +350,7 @@ function New-Entry([string]$Kind, [string]$Key, [string]$Title, $Item) {
 }
 function Find-ById([string]$Id) { if ($Id -and $byId.ContainsKey($Id.ToLower())) { return $byId[$Id.ToLower()] } return $null }
 
-$order = @('logAnalytics', 'appInsights', 'storage', 'sqlServer', 'serviceBus', 'keyVault', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
+$order = @('logAnalytics', 'appInsights', 'storage', 'sqlServer', 'serviceBus', 'keyVault', 'appConfiguration', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
 foreach ($it in @($picked | Where-Object { $_.state -eq 'kind' } | Sort-Object @{ e = { $order.IndexOf([string]$_.kind) } }, name)) {
     $e = New-Entry $it.kind (Get-KeyFor $it.kind $it.name) $it.name $it
     switch ($it.kind) {
@@ -398,6 +399,7 @@ foreach ($it in @($picked | Where-Object { $_.state -eq 'kind' } | Sort-Object @
             }
         }
         'keyVault' { [void]$e.Hosts.Add("$($it.name).vault.azure.net"); [void]$e.Hosts.Add("vaultname=$($it.name)") }
+        'appConfiguration' { [void]$e.Hosts.Add("$($it.name).azconfig.io") }
         'frontDoor' {
             # Its origin: the app whose host name it points at (the apps are read before it).
             $hosts = @()
@@ -628,7 +630,7 @@ $resources = New-Object Collections.ArrayList
 $names = [ordered]@{ resourceGroup = $MainGroup }
 $groups = [ordered]@{}
 $extraNames = New-Object Collections.ArrayList
-$kindOrder = @('logAnalytics', 'appInsights', 'storage', 'storageQueue', 'sqlServer', 'sqlDatabase', 'serviceBus', 'keyVault', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
+$kindOrder = @('logAnalytics', 'appInsights', 'storage', 'storageQueue', 'sqlServer', 'sqlDatabase', 'serviceBus', 'keyVault', 'appConfiguration', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
 foreach ($e in @($entries | Sort-Object @{ e = { $kindOrder.IndexOf($_.Kind) } })) {
     $r = [ordered]@{ kind = $e.Kind; key = $e.Key; title = $e.Title }
     if ($e.Answers.Count) { $r.answers = $e.Answers }

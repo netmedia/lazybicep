@@ -27,6 +27,11 @@ with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet 
 
 - **`frontDoor`**: Azure Front Door Standard/Premium in front of an app of the map (one endpoint, HTTPS only,
   health probes, optional caching). A blueprint's `requires` can name several kinds.
+- **`appConfiguration`** (Developer by default, no access keys, you as Data Owner), **`blobContainer`** (private,
+  one name in every environment, roles on the container) and **`eventGridSubscription`** (a resource's events
+  to a function; made once the function is deployed, so the start after the app's first deploy). Roles:
+  Storage Blob Data Reader, App Configuration Data Reader / Owner; naming types `appconf`, `blob`, `evgs`;
+  the import and the analysis know App Configuration.
 - **SQL**: the apps' database users get `EXECUTE` on `dbo` (`dbGrants`); production databases keep 35 days of
   point-in-time restore and long-term backups (weekly 4 weeks, monthly 12 months, yearly 5 years).
 - Two Flex Consumption apps can share one storage account.
