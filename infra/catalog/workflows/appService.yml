@@ -81,6 +81,26 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+//#if migrate
+      # The database first (BA 4.4): the migrations of {{migrateProject}} as a bundle, run against this
+      # environment's database before the new app runs. The connection: the environment's secret
+      # {{migrateVar}} when there is one (an older app with a SQL login), else its variable
+      # of that name (Entra ID: Active Directory Default signs in as the Azure login above).
+      - name: Migration bundle
+        if: steps.env.outputs.ready
+        run: |
+          if [ -f .config/dotnet-tools.json ]; then dotnet tool restore; else dotnet tool install --global dotnet-ef; fi
+          dotnet ef migrations bundle --project {{migrateProject}} --startup-project {{migrateProject}} --configuration Release --self-contained --target-runtime linux-x64 --output efbundle --force
+      - name: Migrate the database
+        if: steps.env.outputs.ready
+        env:
+          CONNECTION_SECRET: ${{ secrets.{{migrateVar}} }}
+          CONNECTION_VARIABLE: ${{ vars.{{migrateVar}} }}
+        run: |
+          connection="${CONNECTION_SECRET:-$CONNECTION_VARIABLE}"
+          if [ -z "$connection" ]; then echo "::error::No {{migrateVar}} (variable or secret) in this environment (.\infra\azure-setup.ps1)."; exit 1; fi
+          ConnectionStrings__{{migrateConnection}}="$connection" ./efbundle
+//#end
       - uses: {{action:webapps-deploy}}
         if: steps.env.outputs.ready
         with:

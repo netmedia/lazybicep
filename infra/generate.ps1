@@ -606,6 +606,12 @@ function Get-BuildWorkflow($Build, [string[]]$EnvBranches, [string[]]$EnvNames) 
 }
 function Get-StepsYaml($Steps, [string]$If) { return ((@($Steps | Where-Object { $_ }) | ForEach-Object { Get-StepYaml $_ $If }) -join "`n") }
 
+# Database migrations (an app's deploy.migrate): the setting the apps read (ConnectionStrings__<Key>, as the
+# sqlDatabase's "users" settings name it) and the GitHub environment's variable (or secret) with the connection
+# string the workflow migrates with (azure-setup.ps1 sets the variable: the same name rule).
+function Get-MigrationConnection([string]$DatabaseKey) { return $DatabaseKey.Substring(0, 1).ToUpper() + $DatabaseKey.Substring(1) }
+function Get-MigrationVariable([string]$DatabaseKey) { return 'AZURE_' + ($DatabaseKey -creplace '([a-z0-9])([A-Z])', '$1_$2').ToUpper() + '_CONNECTION' }
+
 function Get-Workflows {
     $out = [ordered]@{}
     $envNames = @($naming.environments.PSObject.Properties | ForEach-Object { [string]$_.Value })
@@ -685,6 +691,19 @@ function Get-Workflows {
             if ($f.test) { $v.needs = 'test, route' }
             $v.beforeBuild = Get-StepsYaml $dep.beforeBuild 'steps.env.outputs.ready'
             $v.afterDeploy = Get-StepsYaml $dep.afterDeploy 'steps.env.outputs.ready'
+            # The app that owns the EF Core migrations runs them before it deploys (LAZYBICEP.md, "Database
+            # migrations"): the bundle of migrate.project against migrate.database.
+            $f.migrate = [bool]$dep.migrate
+            if ($dep.migrate) {
+                $m = $dep.migrate
+                $db = Get-Def ([string]$m.database)
+                if (-not $db -or $db.kind -ne 'sqlDatabase') { Fail "$($d.key): deploy.migrate.database must be the key of a SQL database of the map" }
+                if (-not $m.project) { Fail "$($d.key): deploy.migrate.project is the project with the migrations (e.g. Core)" }
+                $v.migrateProject = [string]$m.project
+                $v.migrateConnection = [string]$m.connection
+                if (-not $v.migrateConnection) { $v.migrateConnection = Get-MigrationConnection $db.key }
+                $v.migrateVar = Get-MigrationVariable $db.key
+            }
             if ($d.kind -eq 'functionApp') {
                 $host_ = @(Get-Links $d.key 'host') | Select-Object -First 1
                 $f.flex = $host_ -and (Get-Def $host_.to).kind -eq 'flexPlan'

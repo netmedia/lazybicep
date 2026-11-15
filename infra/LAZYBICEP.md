@@ -8,6 +8,10 @@ environment by environment, with a terminal UI. Windows PowerShell 5.1 or PowerS
 the GitHub CLI; no modules. This file belongs to the kit (`kit.json`); a kit update replaces it, so
 project notes go into the project's own `README.md`.
 
+**It carries out the Netmedia Azure Conventions** (the `netmedia` plugin's `conventions-azure`: naming AZ 1, resource
+groups and tags AZ 2, infrastructure as code AZ 3, identity AZ 4, hosting AZ 5, SQL AZ 7, deployment AZ 12) and the
+Backend Architecture's deploy-time migrations (BA 4.4). The two are kept in sync: a change to one is made in the other.
+
 **Every script explains itself**: `-Help` (or `-h`) shows its guide, modes, options and examples;
 in lazybicep, `?` shows the keys of every screen.
 
@@ -270,6 +274,7 @@ and a workflow written by hand is never overwritten):
 | `dotnet`, `project`, `publishArgs`, `test` | .NET: version, the project to publish, extra publish arguments, a test step run before |
 | `node`, `build`, `app`, `api`, `tokenFallback` | Static Web App: Node version, the build step (in `source`), the built site and its functions folders, an extra token secret |
 | `beforeBuild`, `afterDeploy` | The project's own steps (`{ name, id, run, workingDirectory, comment }`), e.g. a version step, a smoke test |
+| `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations") |
 
 Where it publishes: the push's branch belongs to an environment (`route.ps1` reads `environments/*.json`), and
 the workflow deploys to that environment's app: its name is the GitHub environment's variable
@@ -288,6 +293,35 @@ A workflow finds the environment of a push with `route.ps1`:
 and signs in to Azure with the GitHub environment's `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID` (OIDC, `azure/login`); each app's name is a variable `AZURE_<KEY>_NAME`, a Static
 Web App's token the secret `AZURE_STATIC_WEB_APPS_API_TOKEN_<KEY>`.
+
+### Database migrations
+
+The database changes before the code that needs it: the deploy of the app that owns the EF Core migrations
+(its `deploy.migrate`) builds them into a bundle (`dotnet ef migrations bundle`, self-contained, linux-x64)
+and runs it after the Azure login and before the app is deployed. A failed migration stops that deploy; the
+bundle applies only pending migrations, so a re-run is safe. Apps never migrate on startup outside Development.
+
+| Field | Meaning |
+|---|---|
+| `project` | The project with the migrations and its design-time factory (`--project` and `--startup-project`) |
+| `database` | The key of the map's SQL database it migrates |
+| `connection` | The connection string's name the factory reads (`ConnectionStrings__<connection>`); default: the database's key in Pascal case, the name the apps read too |
+
+The setup does the rest, each step asked:
+
+- **the GitHub environment's variable `AZURE_<DATABASE>_CONNECTION`**: the database's connection string with
+  Entra ID (`Authentication=Active Directory Default`, no password); the workflow signs in as GitHub Actions'
+  app registration through the Azure login. An environment **secret** of the same name wins: an older app whose
+  database still has a SQL login keeps working with the same workflow.
+- **the app registration's database user** (by its client id, like the apps' users) with `db_ddladmin`,
+  `db_datareader` and `db_datawriter`: the migrations change the schema and the seed data.
+
+The bundle reads the connection from the environment variable `ConnectionStrings__<connection>`, and runs on the
+GitHub runner without the solution's files: the project's design-time factory must not require them (Netmedia's
+`DesignTimeDbContextFactoryBase` treats `solutionsettings.json` as optional). The SQL server lets Azure services
+through, and GitHub's hosted runners run in Azure. Other apps deploy on their own, possibly before the migration:
+make breaking schema changes in two steps, expand then contract (Netmedia SQL Coding 10.4), so old and new code
+both work with the database in between.
 
 ### Actions
 
