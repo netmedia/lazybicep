@@ -164,6 +164,17 @@ After `initintoproject`, open the UI (`.\lazybicep.exe`) and press `n`, or run `
 
 It reads files only (runs nothing) and suggests: .NET Web → App Service (runtime, health check path from `MapHealthChecks`); .NET isolated Functions → Function App (Flex Consumption); Blazor WASM or React/Angular/Vue/Vite etc. → Static Web App; Node/Python servers → App Service; SQL connection strings / EF Core → SQL database per connection-string name; Service Bus queues found in code; storage and storage queues; Key Vault; Application Insights. Project references count. Each suggestion shows what it was found from (`Add Shop (ShopDb) (sqlDatabase)? [Y/n]`), then the usual questions with the findings as defaults. Workers, Redis, Cosmos DB, topics, PostgreSQL etc. are reported but not added.
 
+It also sorts every setting each App Service and Function App reads (settings files, `Configuration["..."]`, environment variables, triggers' `Connection` names) and offers them after the app's questions:
+
+| Found | Becomes |
+| --- | --- |
+| A trigger's `Connection = "Sb"`, a connection string with a key | An identity-based setting under the app's own name: `Sb__fullyQualifiedNamespace = {bus.host}` |
+| A password, key, token, client secret | A Key Vault secret you put in; the setting is a Key Vault reference |
+| An empty, placeholder or `localhost` value | A value asked per environment (the map's `values`, a `main.bicep` parameter) |
+| Clients without `DefaultAzureCredential` | A warning with the code change |
+
+Only setting names are read out of the files, never their values.
+
 **1b. Import from Azure** — for a project whose resources already exist.
 
 ```powershell
@@ -217,7 +228,11 @@ Environments: `prod`, `test`, `stag`, `dev`, `accp` (from `naming.json`).
    ```
 3. **Commit** `infra\` (map, `naming.json`, `main.bicep`, `environments\test.json`) and `.github\workflows`. The workflows read these files.
 
-A Start runs these steps in order: save answers to `environments/<env>.json` → Azure resources (what-if, deploy only on a real change) → apps' SQL database users (by managed-identity client id; your IP is let through the firewall for the step, asked first) → GitHub → Azure OIDC trust → GitHub environment (variables, deployment tokens, deploy only from its branch) → custom domains (DNS checked, free certificates) → live checks → a list of manual next steps.
+A Start runs these steps in order: save answers to `environments/<env>.json` → Azure resources (what-if, deploy only on a real change) → apps' SQL database users (by managed-identity client id, with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo`; your IP is let through the firewall for the step, asked first) → monthly budget → GitHub → Azure OIDC trust → GitHub environment (variables, deployment tokens, deploy only from its branch; the branch offered a ruleset) → custom domains (DNS checked, free certificates) → live checks → a list of manual next steps.
+
+**Monthly budget.** After the cost estimate the run asks a monthly budget for the environment (default: the estimate ×1.5, in tens; `-` for none) and who gets its mails. The Budget step sets `monthly-<environment>` on the environment's resource group: mails at 80 % and 100 % of the month's spending and when the forecast passes it. It only alerts, nothing is stopped. A subscription that doesn't offer budgets shows the step as open; the rest of the run goes on.
+
+**Production.** Production deploys from a branch only (no manual-runs-only), and each deploy branch is offered a ruleset: changes through a reviewed pull request, no force-push or deletion (the repository's admins may bypass it). Production databases keep 35 days of point-in-time restore and long-term backups (weekly 4 weeks, monthly 12 months, yearly 5 years). The apps run as their environment: `ASPNETCORE_ENVIRONMENT` / `AZURE_FUNCTIONS_ENVIRONMENT` are `Production`, `Test`, `Staging`…, so `appsettings.Production.json` loads (an environment named `development` would turn on developer-only behaviour in Azure).
 
 ![The eight steps of a Start](images/diagram-start-steps.png)
 
@@ -303,6 +318,9 @@ Each app's `deploy` block in the map says which folder, from which branch, is pu
 - Triggers: changes under the app's `source` folder plus any extra `paths`. With `everyBranch`, tests run on every branch but deploys still only from environment branches.
 - Hooks: `test` (run before publish), `beforeBuild` and `afterDeploy` steps (e.g. version stamping, smoke test).
 - Generated files start with `# GENERATED`. Don't edit them; change the map and run `.\infra\generate.ps1`. A hand-written workflow with the same name is never overwritten.
+- **Database migrations**: the app that owns the EF Core migrations has `deploy.migrate` (`{ "project": "Core", "database": "<sqlDatabase key>" }`). Its workflow builds a migrations bundle (with `dotnet-ef` pinned to the project's EF Core version) before the Azure login and runs it before the app is deployed; a failed migration stops the deploy. The setup gives GitHub's app registration a database user with `db_ddladmin` and sets `AZURE_<DATABASE>_CONNECTION`. A push that changes only the migrations' project deploys too. Make breaking schema changes in two steps (expand, then contract).
+- After an App Service deploy the workflow waits for its health check (2xx; 401/403/302/307 pass with a warning, for apps behind Easy Auth or locked to Front Door).
+- One deploy per app and environment at a time (`concurrency`); in a manual run production comes last and isn't preselected.
 
 ![How a push becomes a deploy](images/diagram-deploy.png)
 
