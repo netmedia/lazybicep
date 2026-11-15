@@ -614,6 +614,33 @@ function Get-BuildWorkflow($Build, [string[]]$EnvBranches, [string[]]$EnvNames) 
 }
 function Get-StepsYaml($Steps, [string]$If) { return ((@($Steps | Where-Object { $_ }) | ForEach-Object { Get-StepYaml $_ $If }) -join "`n") }
 
+# The dotnet-ef the bundle is built with: the project's EF Core version (its PackageReference, or central
+# package management's Directory.Packages.props), else the app's .NET major (EF Core's majors follow .NET's);
+# the latest could need a runtime the workflow doesn't install.
+function Get-EfVersion([string]$Project, [string]$Dotnet) {
+    $dir = Join-Path $repoRoot $Project
+    $found = ''
+    $proj = @(Get-ChildItem $dir -Filter '*.csproj' -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if ($proj) {
+        $m = [regex]::Match((Get-Content $proj.FullName -Raw), '<PackageReference\s+Include="Microsoft\.EntityFrameworkCore(\.[\w.]+)?"\s+Version="([0-9][^"$]*)"')
+        if ($m.Success) { $found = $m.Groups[2].Value }
+    }
+    for ($d = $dir; -not $found -and $d -and $d.Length -ge $repoRoot.Length; $d = Split-Path $d -Parent) {
+        $props = Join-Path $d 'Directory.Packages.props'
+        if (-not (Test-Path $props)) { continue }
+        $m = [regex]::Match((Get-Content $props -Raw), '<PackageVersion\s+Include="Microsoft\.EntityFrameworkCore(\.[\w.]+)?"\s+Version="([0-9][^"$]*)"')
+        if ($m.Success) { $found = $m.Groups[2].Value }
+    }
+    if ($found) { return $found }
+    if ($Dotnet -match '^(\d+)') { return "$($Matches[1]).*" }
+    return ''
+}
+# Database migrations (an app's deploy.migrate): the setting the apps read (ConnectionStrings__<Key>, as the
+# sqlDatabase's "users" settings name it) and the GitHub environment's variable (or secret) with the connection
+# string the workflow migrates with (azure-setup.ps1 sets the variable: the same name rule).
+function Get-MigrationConnection([string]$DatabaseKey) { return $DatabaseKey.Substring(0, 1).ToUpper() + $DatabaseKey.Substring(1) }
+function Get-MigrationVariable([string]$DatabaseKey) { return 'AZURE_' + ($DatabaseKey -creplace '([a-z0-9])([A-Z])', '$1_$2').ToUpper() + '_CONNECTION' }
+
 function Get-Workflows {
     $out = [ordered]@{}
     $envNames = @($naming.environments.PSObject.Properties | ForEach-Object { [string]$_.Value })
@@ -633,6 +660,11 @@ function Get-Workflows {
         $paths = @()
         if ($dep.source) { $paths += "$($dep.source)/**" }
         foreach ($p in @($dep.paths | Where-Object { $_ })) { $paths += $p }
+        # The migrations' project too, when it isn't in the source folder (a new migration deploys).
+        if ($dep.migrate -and $dep.migrate.project) {
+            $mp = ([string]$dep.migrate.project).Trim('/', '\').Replace('\', '/')
+            if (-not $dep.source -or -not ($mp -eq $dep.source -or $mp.StartsWith("$($dep.source)/"))) { $paths += "$mp/**" }
+        }
         $paths += ".github/workflows/$($dep.workflow)"
         $v.paths = ((@($paths | ForEach-Object {
                         if ($_ -is [string]) { "      - $(Get-YamlQuoted $_)" }
@@ -693,6 +725,22 @@ function Get-Workflows {
             if ($f.test) { $v.needs = 'test, route' }
             $v.beforeBuild = Get-StepsYaml $dep.beforeBuild 'steps.env.outputs.ready'
             $v.afterDeploy = Get-StepsYaml $dep.afterDeploy 'steps.env.outputs.ready'
+            # The app that owns the EF Core migrations runs them before it deploys (LAZYBICEP.md, "Database
+            # migrations"): the bundle of migrate.project against migrate.database.
+            $f.migrate = [bool]$dep.migrate
+            if ($dep.migrate) {
+                $m = $dep.migrate
+                $db = Get-Def ([string]$m.database)
+                if (-not $db -or $db.kind -ne 'sqlDatabase') { Fail "$($d.key): deploy.migrate.database must be the key of a SQL database of the map" }
+                if (-not $m.project) { Fail "$($d.key): deploy.migrate.project is the project with the migrations (e.g. Core)" }
+                $v.migrateProject = [string]$m.project
+                $v.migrateConnection = [string]$m.connection
+                if (-not $v.migrateConnection) { $v.migrateConnection = Get-MigrationConnection $db.key }
+                $v.migrateVar = Get-MigrationVariable $db.key
+                $ef = Get-EfVersion ([string]$m.project) ([string]$dep.dotnet)
+                $v.efVersion = ''
+                if ($ef) { $v.efVersion = " --version '$ef'" }
+            }
             if ($d.kind -eq 'functionApp') {
                 $host_ = @(Get-Links $d.key 'host') | Select-Object -First 1
                 $f.flex = $host_ -and (Get-Def $host_.to).kind -eq 'flexPlan'

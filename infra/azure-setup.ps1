@@ -1086,6 +1086,59 @@ function Grant-DatabaseUser($C) {
     finally { $conn.Close() }
 }
 
+# The deploys that run EF Core migrations (an app's deploy.migrate, LAZYBICEP.md "Database migrations"): the
+# database, its server, and the GitHub environment's variable with the connection string the workflow migrates
+# with (Entra ID, no password; generate.ps1 names the variable by the same rule).
+function Get-MigratingDeploys {
+    foreach ($d in @($defs | Where-Object { $_.deploy -and $_.deploy.migrate })) {
+        $dbKey = [string]$d.deploy.migrate.database
+        $hostLink = @($map.connections | Where-Object { $_.from -eq $dbKey -and $_.kind -eq 'host' }) | Select-Object -First 1
+        if (-not $hostLink) { Missing "$($d.key): deploy.migrate.database $dbKey is not a SQL database of the map"; continue }
+        [pscustomobject]@{
+            App        = [string]$d.key
+            Database   = $dbKey
+            Server     = [string]$hostLink.to
+            Variable   = 'AZURE_' + (Get-Upper $dbKey) + '_CONNECTION'
+            Connection = "Server=tcp:{$($hostLink.to).host},1433;Database={$dbKey.name};Authentication=Active Directory Default;Encrypt=True;"
+        }
+    }
+}
+# GitHub Actions' app registration as a database user that may change the schema (db_ddladmin) and the data
+# (seed data, data scripts), for the deploys that migrate. By its client id, like the apps' users.
+function Grant-DeployDatabaseUser([string]$DatabaseKey, [string]$User, [string]$AppId) {
+    $db = $script:res[$DatabaseKey]
+    $hostLink = @($map.connections | Where-Object { $_.from -eq $DatabaseKey -and $_.kind -eq 'host' }) | Select-Object -First 1
+    $server = $script:res[$hostLink.to]
+    $group = $server.Group
+    if (-not $group) { $group = $script:rgName }
+    $label = "$User in $($db.Name)"
+    if (-not (Try-Az @('sql', 'db', 'show', '-g', $group, '-s', $server.Name, '-n', $db.Name))) { Missing "database user ${label}: the database comes first"; return }
+    $conn = Open-Sql $group $server.Name $db.Name
+    if (-not $conn) { return }
+    $quoted = '[' + $User.Replace(']', ']]') + ']'
+    $want = @('db_ddladmin', 'db_datareader', 'db_datawriter')
+    try {
+        $exists = [bool](Get-SqlRows $conn 'SELECT name FROM sys.database_principals WHERE name = @n' $User).Count
+        if ($exists) { Ok "database user $label" }
+        elseif (Confirm-Step "Create the database user $User in $($db.Name) (GitHub Actions runs the migrations as it)?") {
+            $sid = '0x' + ((([guid]$AppId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
+            Invoke-SqlText $conn "CREATE USER $quoted WITH SID = $sid, TYPE = E"
+            Ok "database user $label created"
+            $exists = $true
+        } else { Missing "database user $label" }
+        if ($exists) {
+            $have = Get-SqlRows $conn 'SELECT r.name FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals u ON u.principal_id = m.member_principal_id WHERE u.name = @n' $User
+            $lacking = @($want | Where-Object { $have -notcontains $_ })
+            if (-not $lacking.Count) { Ok "$label`: $($want -join ', ')" }
+            elseif (Confirm-Step "Give $User $($lacking -join ', ') in $($db.Name) (the migrations change the schema)?") {
+                foreach ($role in $lacking) { Invoke-SqlText $conn "ALTER ROLE [$role] ADD MEMBER $quoted" }
+                Ok "$label`: $($want -join ', ')"
+            } else { Missing "$label`: $($lacking -join ', ')" }
+        }
+    } catch { Missing "database user ${label}: $($_.Exception.Message)" }
+    finally { $conn.Close() }
+}
+
 # The apps (App Service, Static Web App) as Azure shows them, or nothing.
 function Get-App([string]$Key) {
     $def = Get-Def $Key
@@ -1994,6 +2047,11 @@ function Invoke-RemoveResource {
             Set-Prop $d 'appSettings' $keep
         }
         if ($d.neededBy -and @($d.neededBy) -contains $k) { Set-Prop $d 'neededBy' @(@($d.neededBy) | Where-Object { $_ -ne $k }) }
+        # A deploy that migrated it (deploy.migrate) migrates nothing any more.
+        if ($d.deploy -and $d.deploy.migrate -and [string]$d.deploy.migrate.database -eq $k) {
+            $d.deploy.PSObject.Properties.Remove('migrate')
+            Note "$($d.key): its deploy doesn't migrate $k any more (deploy.migrate)"
+        }
         if ($d.stateStorage -eq $k) { Missing "$($d.key) keeps its state in ${k}: give it another stateStorage first" }
     }
     $map.resources = @($map.resources | Where-Object { $_.key -ne $k })
@@ -2940,9 +2998,27 @@ function Invoke-Setup {
         } else { Missing "$role on $roleTargetName" }
     }
 
+    # The deploys that run migrations: the app registration's database user (it changes the schema).
+    $migrating = @(Get-MigratingDeploys)
+    if ($migrating.Count -and $entra) {
+        try { foreach ($dbKey in @($migrating | ForEach-Object { $_.Database } | Select-Object -Unique)) { Grant-DeployDatabaseUser $dbKey $deployApp $entra.appId } }
+        finally { Close-SqlFirewall }
+    }
+    # The bundle runs on GitHub's runner (in Azure): a server shared from another group (or imported) doesn't
+    # get main.bicep's AllowAllWindowsAzureIps rule, so it is checked here.
+    foreach ($serverKey in @($migrating | ForEach-Object { $_.Server } | Select-Object -Unique)) {
+        $sres = $script:res[$serverKey]
+        if (-not $sres -or -not $sres.Name -or -not $sres.Group) { continue }
+        $rule = Try-Az @('sql', 'server', 'firewall-rule', 'list', '-g', $sres.Group, '-s', $sres.Name)
+        if (@($rule | Where-Object { $_ -and $_.startIpAddress -eq '0.0.0.0' -and $_.endIpAddress -eq '0.0.0.0' }).Count) { Ok "$($sres.Name) lets Azure services through (the migrations from GitHub's runners)" }
+        else { Missing "$($sres.Name) (shared from $($sres.Group)) doesn't let Azure services through: the migrations from GitHub's runners can't reach it (az sql server firewall-rule create -g $($sres.Group) -s $($sres.Name) -n AllowAllWindowsAzureIps --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0)" }
+    }
+
     Head "3. GitHub environment $ghEnv"
     $vars = [ordered]@{}
     foreach ($p in $map.github.variables.PSObject.Properties) { $vars[$p.Name] = Expand $p.Value }
+    # The connection string each migrating deploy uses (an environment secret of the same name wins in the workflow).
+    foreach ($md in $migrating) { $vars[$md.Variable] = Expand $md.Connection }
     # Each Static Web App's deployment token, as a secret of the GitHub environment (the map's tokenSecrets).
     $tokens = @(foreach ($t in @($map.github.tokenSecrets)) {
             $app = $script:res[$t.resource]
