@@ -23,12 +23,13 @@ The environment of the dry run. Default: test.
 #>
 [CmdletBinding()]
 param(
-    [string]$Out = (Join-Path $PSScriptRoot '..\images'),
+    [string]$Out, # default: docs/images ($PSScriptRoot is empty in a parameter's default in PowerShell 5.1)
     [string]$Environment = 'test'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+if (-not $Out) { $Out = Join-Path $PSScriptRoot '..\images' }
 $Out = [IO.Path]::GetFullPath($Out)
 $edge = @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $edge) { throw 'Microsoft Edge is needed (it turns the HTML frames into PNGs).' }
