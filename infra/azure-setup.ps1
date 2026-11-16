@@ -582,6 +582,7 @@ function Get-Value([string]$Key) {
     if ($parts[1] -eq 'host' -and $hostDef -and $script:res[$parts[0]] -and $script:res[$parts[0]].Name) {
         if ($hostDef.kind -eq 'sqlServer') { return $script:res[$parts[0]].Name + '.database.windows.net' }
         if ($hostDef.kind -eq 'serviceBus') { return $script:res[$parts[0]].Name + '.servicebus.windows.net' }
+        if ($hostDef.kind -eq 'appConfiguration') { return $script:res[$parts[0]].Name + '.azconfig.io' }
     }
     $app = $script:apps[$parts[0]]
     if ($app -and $parts[1] -eq 'host') { return $app.defaultHostName } # staticSites: defaultHostname (same to PowerShell)
@@ -903,6 +904,8 @@ function Read-Resource($Def) {
     $pattern = [string](Get-Field $Def 'pattern')
     $for = [string](Get-Field $Def 'for')
     if ($pattern) { $rule = Fill $naming.$pattern $for (Get-Sub $for) } else { $rule = Get-RuleName $Def.type $target }
+    # A name the same in every environment (a blob container's, an Event Grid subscription's).
+    if ($Def.nameDefault) { $rule = [string]$Def.nameDefault }
     $nameTarget = $target
     if (-not $nameTarget) { $nameTarget = $for }
     $default = Get-Default $Def.key $rule $nameTarget
@@ -1208,6 +1211,7 @@ function Test-RealChange($Change) {
 # DNS instructions, as "at the DNS host of <zone>, add <type> <name> pointing to <value>". The zone is
 # taken as the last two labels (example.com); the name is relative to it, as DNS hosts want it.
 $script:dnsTodo = New-Object System.Collections.ArrayList # still missing at the end of the run
+$script:readyNoted = @{} # what waits for an app's code, reported once a run
 function Get-Zone([string]$Domain) {
     $labels = $Domain.Split('.')
     if ($labels.Count -le 2) { return $Domain }
@@ -2047,10 +2051,10 @@ function Invoke-RemoveResource {
     $def = Get-Def $k
     # What it is in or on (a database's server, a queue's storage account): needed to find it in Azure.
     $hostKey = [string](@($map.connections | Where-Object { $_.from -eq $k -and $_.kind -eq 'host' }) | Select-Object -First 1).to
-    $on = @($map.connections | Where-Object { $_.to -eq $k -and @('host', 'origin') -contains $_.kind } | ForEach-Object { $_.from })
+    $on = @($map.connections | Where-Object { $_.to -eq $k -and @('host', 'origin', 'source', 'deliver') -contains $_.kind } | ForEach-Object { $_.from })
     $mirrors = @($map.resources | ForEach-Object { @($_.secrets) } | Where-Object { $_ -and $_.mirror -and $_.mirror.resource -eq $k })
     if ($on.Count -or $mirrors.Count) {
-        if ($on.Count) { Missing "$k can't go while $($on -join ', ') run on it, are in it or are in front of it: remove them first" }
+        if ($on.Count) { Missing "$k can't go while $($on -join ', ') run on it, are in it, are in front of it or take its events: remove them first" }
         if ($mirrors.Count) { Missing "$k keeps the secret $($mirrors[0].name) of a Key Vault (its mirror): change that in the map first" }
         if ($script:ui) { Send ([ordered]@{ t = 'summary'; env = ''; ghEnv = ''; open = @($script:results | Where-Object { -not $_.Done } | ForEach-Object { $_.Text }); code = 1 }) }
         return 1
@@ -2987,6 +2991,20 @@ function Invoke-Setup {
             $params[$dm.param] = $value
         }
         foreach ($mv in @($map.values | Where-Object { $_ -and $_.param })) { $params[$mv.param] = [string]$script:choices[$mv.answer] }
+        # What waits for an app's code (an Event Grid subscription: Azure checks its function): made once the
+        # function is there, so the first start (before the app's deploy) leaves it for the next one.
+        foreach ($def in @($defs | Where-Object { $_.ready -and $_.ready.param })) {
+            $appKey = [string]$def.ready.app
+            $appName = ''
+            if ($script:res[$appKey]) { $appName = [string]$script:res[$appKey].Name }
+            $ready = $false
+            if ($appName) { $ready = [bool](Try-Az @('functionapp', 'function', 'show', '-g', $rgName, '-n', $appName, '--function-name', [string]$def.ready.function)) }
+            $params[[string]$def.ready.param] = $ready
+            if (-not $ready -and -not $script:readyNoted[$def.key]) {
+                $script:readyNoted[$def.key] = $true
+                Missing "$($def.title): made once $appName has its function $($def.ready.function) (deploy the app's code, then run a start again)"
+            }
+        }
         $params.ownerObjectId = $ownerId
         foreach ($k in $secretParams.Keys) { $params[$k] = $secretParams[$k] }
         $parameters = [ordered]@{}

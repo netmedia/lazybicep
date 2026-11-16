@@ -1,0 +1,38 @@
+{
+  "kind": "eventGridSubscription",
+  "title": "Event Grid subscription",
+  "about": "Events of a resource of the map (App Configuration, a storage account, Service Bus) delivered to a function of a Function App: an Event Grid system topic on the resource (Basic: 100,000 operations a month free) and the subscription. Azure checks the function when the subscription is made, so it follows the app's first deploy (the next start).",
+  "addable": true,
+  "keyDefault": "events",
+  "naming": { "type": "evgs", "about": "Event Grid subscription", "maxLength": 64 },
+  "questions": [
+    { "id": "function", "label": "The function that gets the events (its name in the Function App)", "default": "OnEvent" },
+    { "id": "eventTypes", "label": "Event types (comma-separated; '-' for all)", "default": "-" },
+    { "id": "filterKey", "label": "Advanced filter: the event's field to match, e.g. data.key ('-' for none)", "default": "-" },
+    { "id": "filterEndsWith", "label": "... the value it ends with ('-' for none)", "default": "-" }
+  ],
+  "requires": [
+    { "kinds": ["appConfiguration", "storage", "serviceBus"], "as": "source", "field": "source", "question": "Whose events does <title> deliver?", "connection": { "kind": "source", "what": "takes the events of", "via": "an Event Grid system topic" } },
+    { "kinds": ["functionApp"], "as": "target", "field": "target", "question": "Which Function App gets them?", "connection": { "kind": "deliver", "what": "delivers to", "via": "its function (AzureFunction endpoint)" } }
+  ],
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (events of <source> to <target>)",
+    "type": "evgs",
+    "armType": "Microsoft.EventGrid/systemTopics/eventSubscriptions",
+    "ask": "child",
+    "nameDefault": "<key>",
+    "param": "<key>Name",
+    "kind": "eventGridSubscription",
+    "function": "<q.function>",
+    "eventTypes": "<q.eventTypes>",
+    "filterKey": "<q.filterKey>",
+    "filterEndsWith": "<q.filterEndsWith>",
+    "ready": { "app": "<target>", "function": "<q.function>", "param": "<key>Ready" },
+    "role": "Events of <source> to the function <q.function> of <target>",
+    "cost": { "kind": "table", "order": 33, "label": "Event Grid {name} (Basic)", "prices": {}, "otherwise": null, "text": "0 (100,000 operations a month free)" }
+  },
+  "providers": ["Microsoft.EventGrid"],
+  "removeOrder": { "types": ["Microsoft.EventGrid/systemTopics"], "before": ["Microsoft.Web/sites", "Microsoft.AppConfiguration/configurationStores"] }
+}

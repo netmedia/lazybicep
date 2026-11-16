@@ -160,6 +160,7 @@ function Get-TokenBicep([string]$Token) {
                 # Known from the name (the server may be shared from another group).
                 'sqlServer' { return "'`${$($d.param)}`${environment().suffixes.sqlServerHostname}'" }
                 'serviceBus' { return "'`${$($d.param)}.servicebus.windows.net'" }
+                'appConfiguration' { return "'`${$($d.param)}.azconfig.io'" }
             }
             return "$key.properties.defaultHostName"
         }
@@ -321,13 +322,39 @@ function Get-Section($Def) {
             }
             $v.queues = $lines -join "`n"
         }
-        'storageQueue' {
+        { $_ -eq 'storageQueue' -or $_ -eq 'blobContainer' } {
             $host_ = @(Get-Links $key 'host') | Select-Object -First 1
             $parent = $null
             if ($host_) { $parent = Get-Def $host_.to }
             if (-not $parent -or $parent.kind -ne 'storage') { Fail "$key needs a host connection to its storage account" }
             $v.parent = $parent.key
             $v.parentTitle = $parent.title
+        }
+        'eventGridSubscription' {
+            # The source's system topic (its type by the source's kind) and the function it delivers to.
+            $src = $null; $dst = $null
+            $l = @(Get-Links $key 'source') | Select-Object -First 1
+            if ($l) { $src = Get-Def $l.to }
+            $l = @(Get-Links $key 'deliver') | Select-Object -First 1
+            if ($l) { $dst = Get-Def $l.to }
+            $topicTypes = @{ appConfiguration = 'Microsoft.AppConfiguration.ConfigurationStores'; storage = 'Microsoft.Storage.StorageAccounts'; serviceBus = 'Microsoft.ServiceBus.Namespaces' }
+            if (-not $src -or -not $topicTypes.ContainsKey([string]$src.kind)) { Fail "$key needs a source connection to an App Configuration, a storage account or a Service Bus" }
+            if (-not $dst -or $dst.kind -ne 'functionApp') { Fail "$key needs a deliver connection to a Function App" }
+            if (-not $Def.function) { Fail "$key has no function (the one that gets the events)" }
+            $v.source = $src.key
+            $v.sourceTitle = $src.title
+            $v.topicType = $topicTypes[[string]$src.kind]
+            $v.target = $dst.key
+            $v.targetTitle = $dst.title
+            $v.function = [string]$Def.function
+            $v.ready = [string]$Def.ready.param
+            $types = @(([string]$Def.eventTypes).Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne '-' })
+            $v.eventTypes = ''
+            if ($types.Count) { $v.eventTypes = "      includedEventTypes: [$((@($types | ForEach-Object { Get-Quoted $_ })) -join ', ')]" }
+            $v.filters = ''
+            if ($Def.filterKey -and $Def.filterKey -ne '-' -and $Def.filterEndsWith -and $Def.filterEndsWith -ne '-') {
+                $v.filters = "      advancedFilters: [{ operatorType: 'StringEndsWith', key: $(Get-Quoted $Def.filterKey), values: [$(Get-Quoted $Def.filterEndsWith)] }]"
+            }
         }
         'frontDoor' {
             $o = @(Get-Links $key 'origin') | Select-Object -First 1
@@ -421,9 +448,9 @@ function Get-Bicep {
         $out.Add("@description($(Get-Quoted "$($mv.label): asked per environment."))")
         $out.Add("param $($mv.param) string = ''")
     }
-    if (@($defs | Where-Object { $_.kind -eq 'keyVault' }).Count) {
+    if (@($defs | Where-Object { @('keyVault', 'appConfiguration') -contains $_.kind }).Count) {
         $out.Add('')
-        $out.Add("@description('Object id of the person running the setup: Key Vault Secrets Officer (for the secrets put in by hand); empty = none.')")
+        $out.Add("@description('Object id of the person running the setup: Key Vault Secrets Officer, App Configuration Data Owner (the secrets and keys put in by hand); empty = none.')")
         $out.Add("param ownerObjectId string = ''")
     }
     foreach ($d in $defs) {

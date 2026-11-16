@@ -1,0 +1,35 @@
+{
+  "kind": "appConfiguration",
+  "title": "App Configuration",
+  "about": "An App Configuration store (Developer by default: 3,000 requests a day included) with Entra sign-in only (no access keys): the apps that read it get App Configuration Data Reader and its endpoint; you get App Configuration Data Owner to write the keys.",
+  "addable": true,
+  "keyDefault": "appConfig",
+  "naming": { "type": "appconf", "about": "App Configuration store", "maxLength": 50 },
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (globally unique: <name>.azconfig.io)",
+    "type": "appconf",
+    "armType": "Microsoft.AppConfiguration/configurationStores",
+    "ask": "own",
+    "free": "nameAvailable",
+    "apiVersion": "2024-06-01",
+    "param": "<key>Name",
+    "kind": "appConfiguration",
+    "ownerRole": "App Configuration Data Owner",
+    "role": "App Configuration store: Entra sign-in only; you write the keys (Data Owner)",
+    "size": { "answer": "<key>Sku", "param": "<key>Sku", "label": "Tier of <title>", "options": ["developer", "free", "standard"], "default": "developer" },
+    "cost": { "kind": "table", "order": 32, "label": "App Configuration {name} ({size})", "prices": { "developer": 3.70, "free": 0, "standard": 34.20 }, "texts": { "free": "0 (1,000 requests a day, one per subscription)" } }
+  },
+  "users": {
+    "kinds": ["appService", "functionApp"],
+    "question": "Which apps read <title>?",
+    "roles": { "question": "What may <app> do on <title>?", "options": ["App Configuration Data Reader", "App Configuration Data Owner"], "default": ["App Configuration Data Reader"] },
+    "connection": { "kind": "role", "what": "reads its keys", "via": "its managed identity" },
+    "settings": [
+      { "name": "AppConfiguration__<Key>__Endpoint", "value": "https://{<key>.host}" }
+    ]
+  },
+  "providers": ["Microsoft.AppConfiguration"],
+  "removeOrder": { "types": ["Microsoft.AppConfiguration/configurationStores"], "before": ["Microsoft.Web/serverFarms"] }
+}

@@ -1,0 +1,37 @@
+{
+  "kind": "blobContainer",
+  "title": "Blob container",
+  "about": "A private blob container of a storage account of the map, with the same name in every environment. The apps that use it get a blob role on that container only and its address; no keys.",
+  "addable": true,
+  "keyDefault": "container",
+  "naming": { "type": "blob", "about": "blob container", "maxLength": 63 },
+  "questions": [
+    { "id": "name", "label": "Name of <title> in every environment (3-63 lowercase letters, digits and hyphens)", "default": "<key>" }
+  ],
+  "requires": [
+    { "kind": "storage", "question": "Which storage account is it in?", "connection": { "kind": "host", "what": "is a container of", "via": "blobServices/default" } }
+  ],
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (a private container of <host.title>)",
+    "type": "blob",
+    "armType": "Microsoft.Storage/storageAccounts/blobServices/containers",
+    "ask": "child",
+    "nameDefault": "<q.name>",
+    "param": "<key>Name",
+    "kind": "blobContainer",
+    "role": "A private container of <host.title>",
+    "cost": { "kind": "table", "order": 31, "label": "Blob container {name}", "prices": {}, "otherwise": null, "text": "the storage account's blobs" }
+  },
+  "users": {
+    "kinds": ["appService", "functionApp"],
+    "question": "Which apps use <title>?",
+    "roles": { "question": "What may <app> do on <title>?", "options": ["Storage Blob Data Reader", "Storage Blob Data Contributor", "Storage Blob Data Owner"], "default": ["Storage Blob Data Reader"] },
+    "connection": { "kind": "role", "what": "reads (or writes) its blobs", "via": "its managed identity" },
+    "settings": [
+      { "name": "BlobContainers__<Key>__Uri", "value": "{<host>.blobEndpoint}{<key>.name}" }
+    ]
+  },
+  "providers": ["Microsoft.Storage"]
+}

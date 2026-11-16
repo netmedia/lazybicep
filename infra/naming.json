@@ -24,7 +24,10 @@
     "insights": "Application Insights",
     "deploy": "Entra app registration GitHub Actions deploys with",
     "sbus": "Service Bus namespace",
-    "queue": "storage queue"
+    "queue": "storage queue",
+    "appconf": "App Configuration store",
+    "blob": "blob container",
+    "evgs": "Event Grid subscription"
   },
   "environments": {
     "prod": "production",
@@ -49,6 +52,9 @@
     "sqlserv": 63,
     "sqldb": 128,
     "sbus": 50,
-    "queue": 63
+    "queue": 63,
+    "appconf": 50,
+    "blob": 63,
+    "evgs": 64
   }
 }
