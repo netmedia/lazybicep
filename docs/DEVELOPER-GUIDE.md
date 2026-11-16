@@ -294,6 +294,9 @@ Available kinds:
 | `keyVault` | RBAC vault |
 | `appInsights`, `logAnalytics` | Telemetry |
 | `frontDoor` | Front Door Standard/Premium in front of an app (custom domain and locking the app to Front Door are manual for now) |
+| `appConfiguration` | App Configuration store (Developer by default), Entra sign-in only; you get Data Owner to write the keys |
+| `blobContainer` | A private blob container (same name in every environment), roles scoped to the container |
+| `eventGridSubscription` | A resource's events to a function: system topic + subscription; made by the start after the function's first deploy |
 
 **Several of one kind** (two APIs, two databases) is fine: add it again with a different key; it gets its own sub-application name, e.g. `<prefix>-api2-apiapp-<env>`.
 

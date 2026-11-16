@@ -232,6 +232,7 @@ $dotnetRules = [ordered]@{
     blob        = '^(azure\.storage\.blobs|azure\.data\.tables|azure\.storage\.files\..*|windowsazure\.storage|microsoft\.azure\.storage\..*|microsoft\.azure\.functions\.worker\.extensions\.storage\.blobs|microsoft\.azure\.functions\.worker\.extensions\.tables)$'
     queue       = '^(azure\.storage\.queues|microsoft\.azure\.functions\.worker\.extensions\.storage\.queues|microsoft\.azure\.webjobs\.extensions\.storage\.queues)$'
     keyVault    = '^(azure\.security\.keyvault\..*|azure\.extensions\.aspnetcore\.configuration\.secrets|microsoft\.extensions\.configuration\.azurekeyvault)$'
+    appConfig   = '^(azure\.data\.appconfiguration|microsoft\.extensions\.configuration\.azureappconfiguration|microsoft\.azure\.appconfiguration\..*)$'
     appInsights = '^(microsoft\.applicationinsights.*|azure\.monitor\.opentelemetry\..*|microsoft\.azure\.functions\.worker\.applicationinsights)$'
     postgres    = '^(npgsql.*)$'
     mysql       = '^(pomelo\..*|mysql\..*|mysqlconnector)$'
@@ -243,19 +244,19 @@ $dotnetRules = [ordered]@{
 }
 $nodeRules = [ordered]@{
     sql = '^(mssql|tedious)$'; serviceBus = '^@azure/service-bus$'; blob = '^(@azure/storage-blob|@azure/data-tables)$'; queue = '^@azure/storage-queue$'
-    keyVault = '^@azure/keyvault-.*$'; appInsights = '^(applicationinsights|@azure/monitor-opentelemetry)$'; postgres = '^(pg|postgres)$'; mysql = '^(mysql|mysql2)$'
+    keyVault = '^@azure/keyvault-.*$'; appConfig = '^@azure/app-configuration.*$'; appInsights = '^(applicationinsights|@azure/monitor-opentelemetry)$'; postgres = '^(pg|postgres)$'; mysql = '^(mysql|mysql2)$'
     cosmos = '^@azure/cosmos$'; mongo = '^(mongodb|mongoose)$'; redis = '^(redis|ioredis)$'; eventHubs = '^@azure/event-hubs$'
 }
 $pythonRules = [ordered]@{
     sql = '^(pyodbc|pymssql|mssql-django)$'; serviceBus = '^azure-servicebus$'; blob = '^(azure-storage-blob|azure-data-tables)$'; queue = '^azure-storage-queue$'
-    keyVault = '^azure-keyvault-.*$'; appInsights = '^(azure-monitor-opentelemetry.*|opencensus-ext-azure|applicationinsights)$'; postgres = '^(psycopg|psycopg2|psycopg2-binary|asyncpg)$'
+    keyVault = '^azure-keyvault-.*$'; appConfig = '^azure-appconfiguration.*$'; appInsights = '^(azure-monitor-opentelemetry.*|opencensus-ext-azure|applicationinsights)$'; postgres = '^(psycopg|psycopg2|psycopg2-binary|asyncpg)$'
     mysql = '^(mysqlclient|pymysql)$'; cosmos = '^azure-cosmos$'; mongo = '^(pymongo|motor)$'; redis = '^redis$'; eventHubs = '^azure-eventhub$'
 }
 $signalNames = @{
-    sql = 'SQL Server'; serviceBus = 'Service Bus'; blob = 'Blob/Table storage'; queue = 'Storage queues'; keyVault = 'Key Vault'; appInsights = 'Application Insights'
+    sql = 'SQL Server'; serviceBus = 'Service Bus'; blob = 'Blob/Table storage'; queue = 'Storage queues'; keyVault = 'Key Vault'; appInsights = 'Application Insights'; appConfig = 'App Configuration'
     postgres = 'PostgreSQL'; mysql = 'MySQL'; cosmos = 'Cosmos DB'; mongo = 'MongoDB'; redis = 'Redis'; eventHubs = 'Event Hubs'; signalr = 'Azure SignalR'
 }
-$catalogSignals = @('sql', 'serviceBus', 'blob', 'queue', 'keyVault', 'appInsights')
+$catalogSignals = @('sql', 'serviceBus', 'blob', 'queue', 'keyVault', 'appInsights', 'appConfig')
 
 # What a setting is, from its value (or its name).
 function Get-SettingKind([string]$Name, [string]$Value) {
@@ -265,6 +266,7 @@ function Get-SettingKind([string]$Name, [string]$Value) {
     if ($v -match 'DefaultEndpointsProtocol=|AccountName=|UseDevelopmentStorage=true|\.(blob|queue|table)\.core\.windows\.net') { return 'storage' }
     if ($v -match 'InstrumentationKey=') { return 'appInsights' }
     if ($v -match '\.vault\.azure\.net') { return 'keyVault' }
+    if ($v -match '\.azconfig\.io') { return 'appConfig' }
     if ($v -match '\.redis\.cache\.windows\.net|abortConnect=|:63(79|80)\b') { return 'redis' }
     if ($v -match '^mongodb(\+srv)?://') { return 'mongo' }
     if ($v -match '^postgres(ql)?://|(^|;)\s*Host\s*=') { return 'postgres' }
@@ -829,6 +831,10 @@ if ($busUsers.Count) {
         elseif ($recv -and -not $send) { $roles[$u.Key][$k] = @('Azure Service Bus Data Receiver') }
     }
 }
+
+# App Configuration: the store for the apps that read it.
+$appConfigUsers = @(Get-Users 'appConfig')
+if ($appConfigUsers.Count) { Add-Resource 'appConfiguration' (Get-FreeKey 'appConfig') 'App Configuration' $null $appConfigUsers (Get-Evidence $appConfigUsers 'appConfig') }
 
 $vaultUsers = @(Get-Users 'keyVault')
 if ($vaultUsers.Count) { Add-Resource 'keyVault' (Get-FreeKey 'vault') 'Key Vault' $null $vaultUsers (Get-Evidence $vaultUsers 'keyVault') }
