@@ -24,7 +24,7 @@
     "secrets": []
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps read secrets from <title>?",
     "connection": { "kind": "role", "roles": ["Key Vault Secrets User"], "what": "reads secrets", "via": "Key Vault references: Key Vault Secrets User" },
     "settings": []

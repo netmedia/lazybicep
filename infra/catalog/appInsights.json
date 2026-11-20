@@ -23,7 +23,7 @@
     "cost": { "kind": "logs", "order": 5, "label": "Application Insights + Log Analytics" }
   },
   "users": {
-    "kinds": ["appService", "functionApp", "staticWebApp"],
+    "kinds": ["appService", "functionApp", "containerApp", "staticWebApp"],
     "question": "Which apps send their telemetry to <title>?",
     "connection": { "kind": "telemetry", "what": "telemetry", "via": "APPLICATIONINSIGHTS_CONNECTION_STRING" },
     "settings": [

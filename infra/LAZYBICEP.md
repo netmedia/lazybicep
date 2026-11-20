@@ -63,6 +63,7 @@ output, `node_modules` and `infra`:
 |---|---|
 | A .NET Web project (`Microsoft.NET.Sdk.Web`) | An App Service: its runtime from the target framework, its folder as the source, the health check path from `MapHealthChecks` (none when there is none) |
 | A .NET Functions project (isolated worker) | A Function App (Flex Consumption), its runtime from the target framework |
+| A `Dockerfile` (or `Containerfile`) in the folder of a .NET Web project, a Node or a Python server | A Container App instead of an App Service: its Dockerfile, its build context (the repository root when the Dockerfile copies files from outside its folder or the project references projects outside it), its port (`EXPOSE`, default 8080); one Container Apps environment and one container registry for all of them. A Dockerfile anywhere else is noted |
 | Blazor WebAssembly (not hosted by a web project) | A Static Web App (its workflow's build step to change to `dotnet publish`) |
 | `package.json` with React, Angular, Vue, Svelte, Next, Nuxt, Astro, Vite... | A Static Web App with the folder its build writes (`dist`, `build`, Angular's `outputPath`...); a front end inside a .NET web project (`ClientApp`) is that project's |
 | `package.json` with Express, Nest, Fastify, Koa...; `@azure/functions` | An App Service (Node); a Function App (Node) |
@@ -97,7 +98,9 @@ it reads: its `appsettings*.json`, `local.settings.json` and `.env` (key names l
 | Clients made without a credential, a connection string with a key, `CloudStorageAccount` | a warning with the code change: `DefaultAzureCredential` (the map has no keys) |
 
 Only the settings' names leave the files, never their values. A run's next steps list the secrets still
-missing in a vault (`az keyvault secret set ...`) and the apps to restart after them. Removing an app takes
+missing in a vault (`az keyvault secret set ... --file <a file only you can read> --encoding utf-8`: the value
+never goes on the command line, where the process list and the shell history would keep it; delete the file
+afterwards) and the apps to restart after them. Removing an app takes
 its values and the secrets only it reads out of the map (Azure keeps the secrets until you delete them).
 `.\infra\analyze.ps1` shows what it would suggest without starting; `-Out spec.json` writes it as a spec
 file to edit and use with `-SpecFile`.
@@ -119,23 +122,29 @@ Vaults, Application Insights and workspaces are shared from theirs). From each r
 | `Microsoft.Storage/storageAccounts` | A storage account and its queues (read with your sign-in, never the keys) |
 | `Microsoft.KeyVault/vaults`, `Microsoft.Insights/components`, `Microsoft.OperationalInsights/workspaces` | Key Vault, Application Insights (with its workspace), Log Analytics |
 | `Microsoft.Cdn/profiles` (Front Door) | A Front Door in front of the app its origin is |
+| `Microsoft.App/containerApps` | A Container App: its environment and registry, ingress, port, size, replicas, revision mode, health path (from its probes), sign-in (on, unauthenticated action, excluded paths) and the names of its Key Vault secrets; the image only as information. Noted: more than one container, scale rules (a start drops them), plain HTTP allowed, secrets kept in the app instead of Key Vault, sign-in with another provider than Entra ID |
+| `Microsoft.App/managedEnvironments` | A Container Apps environment with its Log Analytics workspace. Noted: a virtual network, a Consumption-only environment (the catalog's has workload profiles) |
+| `Microsoft.ContainerRegistry/registries` | A container registry with its tier. Noted: admin user or anonymous pull on (a start turns them off), no public network access |
+| `Microsoft.ManagedIdentity/userAssignedIdentities` | No suggestion of its own: the identity of exactly one imported app becomes that app's (connect keeps its real name). One that several apps share, or that no app uses, is reported, not imported |
 
 What each app uses comes from its app settings and connection strings (matched by host names, Key Vault
 references, Application Insights' key; the values are never shown or kept) and from its managed
-identity's role assignments, which give its roles too.
+identity's role assignments, which give its roles too. An app that signs in as a system-assigned identity
+is noted: a start gives it its own identity (below, "Identity").
 
 Then it asks: **connect** to these resources, or create **new** ones by the map's definitions.
 
 - **connect**: the map takes them over. After the map is written, `environments/<env>.json` gets their
   real names (marked imported), so the environment's first dry run asks every question once with them as
-  the defaults and finds them; a start then adds what is missing, each change asked first: managed
-  identities, roles, the apps' settings, the kit's security (no keys, no FTP or basic auth), the GitHub
+  the defaults and finds them; a start then adds what is missing, each change asked first: the apps' own
+  identities (an app on a system-assigned identity is switched to its own; the next steps list the old
+  identity's role assignments and SQL users to remove by hand), roles, the apps' settings, the kit's security (no keys, no FTP or basic auth), the GitHub
   trust (OIDC), the GitHub environment and the deploy workflows.
 - **new**: the map gets the same resources, made new next to them by the naming rules, with managed
   identities and without keys; move the data and remove the old ones by hand.
 
-A type the catalog has no kind for (a classic CDN profile, Redis, Cosmos DB, Container Apps, Service Bus
-topics...) is reported, and `infra/new-kinds.md` gets a prompt for each: what to build (the blueprint, the
+A type the catalog has no kind for (a classic CDN profile, Redis, Cosmos DB, Service Bus topics...) is
+reported, and `infra/new-kinds.md` gets a prompt for each: what to build (the blueprint, the
 fragment, naming, the import's mapping, the docs) and the resource's properties without secrets. Paste it
 to Claude Code in the LazyBicep repository; once the kind is in the kit, `initintoproject.ps1 -Update`
 brings it and `-AddResource` adds the resource. `.\infra\import.ps1 -ResourceGroup <rg> [-List]` shows
@@ -154,7 +163,8 @@ app what it uses. Then it writes the map and `naming.json` and generates `main.b
 changes yet: a dry run asks the names of an environment and shows what would be created, a start creates
 it.
 
-A **spec file** answers all of it (examples/spec.example.json in the LazyBicep repository):
+A **spec file** answers all of it (examples/spec.example.json in the LazyBicep repository;
+examples/spec.containerapp.json for a container app with sign-in next to a function app):
 
 ```json
 {
@@ -187,18 +197,19 @@ az login                    # add --tenant <tenant> if the subscription is in an
 | Choice | Switch | What it does |
 |---|---|---|
 | Dry run | `-DryRun` | Asks every question, shows what exists and what would be created or changed. Changes and saves nothing |
-| Check | `-Check` | For an environment that is set up: its saved answers, no questions; reports what is in place and what is missing. Changes nothing |
+| Check | `-Check` | For an environment that is set up: its saved answers, no questions; reports what is in place and what is missing (also the apps' identity guards, below "Identity", and the container apps' image, sign-in and Key Vault secrets). Changes nothing |
 | Start | `-Start` | Asks every question, then creates and updates what is missing, each change asked first |
-| Remove all | `-Remove` (`-RemoveAll`) | Deletes everything the setup created for an environment, shown first and confirmed by typing the resource group's name |
+| Remove all | `-Remove` (`-RemoveAll`) | Deletes everything the setup created for an environment, shown first and confirmed by typing the resource group's name: the apps' role assignments first (also on a vault shared from elsewhere), the apps before their own identities; the container apps' sign-in app registrations are asked one by one (Entra keeps them restorable for 30 days) |
 | Add a resource | `-AddResource [-Kind <kind> \| -Import [-ResourceGroup <rg>]]` | Adds a resource of the catalog to the map with its connections, generates `main.bicep`; or imports resources from Azure into the map (asked first; see "Importing from Azure") |
-| Remove a resource | `-RemoveResource [-Key <key>]` | Takes a resource out of the map with everything that refers to it, generates `main.bicep`; then offers to **delete it from Azure**: no by default, then per environment its exact name typed (and `delete prod` for production); only what the setup made, never a shared resource; an app's role assignments go first; a Key Vault's purge is asked |
+| Remove a resource | `-RemoveResource [-Key <key>]` | Takes a resource out of the map with everything that refers to it, generates `main.bicep`; then offers to **delete it from Azure**: no by default, then per environment its exact name typed (and `delete prod` for production); only what the setup made, never a shared resource; an app's role assignments go first, then the app, its sign-in app registration (asked) and its own identity; a Container Apps environment or registry stays while a container app uses it; a Key Vault's purge is asked |
 | New project | `-Init [-SpecFile <file>]` | Makes the map of a new project |
 
 More: `-Environment prod|test|stag|dev|accp`, `-RefreshToken`, `-Currency`, `-Help`. A run's steps:
 answers (saved in `environments/<env>.json`), Azure resources (what-if first; deployed only on a real
-change), the apps' database users (when there is SQL), GitHub -> Azure trust (OIDC), the GitHub
-environment (variables, deployment tokens, deployments only from its branch), custom domains (DNS checked,
-free certificates), live checks, and the next steps by hand. Every mode shows the estimated monthly cost
+change), Sign-in app registrations (container apps with `signIn`), the apps' database users (when there is
+SQL), GitHub -> Azure trust (OIDC), the GitHub environment (variables, deployment tokens, deployments only
+from its branch), First image (container apps still on the placeholder), custom domains (DNS checked, free
+certificates), live checks, and the next steps by hand. Every mode shows the estimated monthly cost
 (Azure list prices).
 
 **A monthly budget** per environment: after the estimate a run asks the budget (default: the estimate with
@@ -208,9 +219,12 @@ mails at 80 % and 100 % of the month's spending and when the month's forecast pa
 nothing is stopped. It is set with the Azure CLI apart from `main.bicep`, so a subscription that doesn't
 offer budgets (some sponsorship and partner offers) only shows the step open; a dry run and a check show the
 budget and what was spent this month; removing the environment deletes it. Answers saved before there was a
-budget: a check says so, a dry run or start asks it.
+budget: a check says so, a dry run or start asks it. Container apps in the estimate: a registry by its tier;
+an environment and an app that scales to zero per use (after the subscription's monthly free grant); an app
+with minimum replicas at the Consumption active price of those replicas all month (an upper bound).
 
-A **new environment** can start from another one's answers (e.g. test from prod): the first question offers it. Names move to the new environment (`-prod` becomes `-test`, or `-test` is added); custom domains follow the same logic (`dev.app.example.com` -> `test.app.example.com`, `app.example.com` -> `app-test.example.com`); the deploy branch too (`production` -> `test`, `prod` -> `test`, `release/prod` -> `release/test`; anything else: manual runs), and a start offers to create a missing branch from the source's. Shared resources stay shared; every question is still asked, nothing is saved before the usual save.
+A **new environment** can start from another one's answers (e.g. test from prod): the first question offers it. Names move to the new environment (`-prod` becomes `-test`, or `-test` is added); custom domains follow the same logic (`dev.app.example.com` -> `test.app.example.com`, `app.example.com` -> `app-test.example.com`); the deploy branch too (`production` -> `test`, `prod` -> `test`, `release/prod` -> `release/test`; anything else: manual runs), and a start offers to create a missing branch from the source's. Shared resources stay shared; every question is still asked, nothing is saved before the usual save. A
+container app's sign-in app registration belongs to its environment: its client id is not copied.
 
 Idempotent: a second run with the same answers changes nothing. `<` goes back to the previous question
 until the first change.
@@ -239,12 +253,20 @@ Each resource (in the order asked and saved) has:
 | `type` | The naming type (`naming.json`); `target`: the deployment target whose sub application name it carries |
 | `armType` | The Azure resource type |
 | `ask` | `group`, `own` (in the environment's group), `shared` (may be an existing one elsewhere, used as it is), `workspace` (Log Analytics of the `neededBy` Application Insights), `child` (a name only: a database on its server, a queue in its storage account), `name` (a name only) |
-| `free`, `check` | Checks for a new name (`nameAvailable`, `vaultSoftDelete`) and for an existing resource (`linuxPlanInRegion`, `sameRegion`, `rbacVault`) |
+| `free`, `check` | Checks for a new name (`nameAvailable`, `vaultSoftDelete`, `registryName`) and for an existing resource (`linuxPlanInRegion`, `sameRegion`, `rbacVault`) |
+| `identity` | An app's own user-assigned identity: the key of its `appIdentity` (`<key>Identity`). An app without it (a map from 0.1.0) keeps a system-assigned identity (below, "Identity") |
+| `owner` | An `appIdentity`'s app: the one app that names it as its `identity` |
 | `param`, `groupParam` | Its `main.bicep` parameters |
 | `size`, `choice`, `variants`, `when`, `optional`, `admin` | Answers asked with it, fields that depend on a choice, asked only for some answers, saved only when used |
 | `tag` | A short label shown with it in lazybicep and in the questions; without one it comes from the map: a choice per environment shows its options (`shared/separate`, or the environment's answer on Home), a `when` resource `only if separate` |
 | `cost` | Its row in the cost estimate (`appServicePlan`, `staticWebApp`, `pennies`, `logs`, `table`) |
-| `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{secret.<name>}`, `{webDomain}`... |
+| `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{apiIdentity.clientId}` (`.principalId`, `.id`), `{api.group}`, `{secret.<name>}`, `{webDomain}`... |
+| `environment`, `registry` | A container app's Container Apps environment and container registry (their keys) |
+| `port`, `cpu`, `memory` | A container app's target port; vCPU (0.25 to 4 in steps of 0.25) and memory (2 GiB per vCPU: `0.5` with `1Gi`) |
+| `minReplicas`, `maxReplicas`, `revisionMode` | Its replicas (min 0 or more, 0 = scales to zero when idle; max 1-1000) and revisions (`single`: a deploy replaces the running one, or `multiple`) |
+| `ingress`, `sticky` | `external` (from the internet) or `internal` (from the environment only), always HTTPS only; sticky sessions (`yes`/`no`, single revision mode only) |
+| `healthCheckPath` | An App Service's health check; a container app's startup, liveness and readiness probes (`-` for none: no probes) |
+| `signIn` | A container app's sign-in by the platform (below, "Container Apps"): `"entra"`, or `{ provider, unauthenticated, excludedPaths, identifierUri, appRoles }` |
 | `secrets`, `handSecrets` | Key Vault secrets the setup keeps (`by: setup`) or that are put in by hand (`by: hand`; `setting`, `app`: who reads it as what) |
 | `deploy` | An app's deploy (below, "Deploy workflows"): which folder is built how, triggered by what, published where; `generate.ps1` makes its GitHub Actions workflow |
 
@@ -253,15 +275,20 @@ Each resource (in the order asked and saved) has:
 
 Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `deploy`, `token`, `origin`),
 `domains`, `github` (variables, deployment tokens, deploy roles, workflows), `live`, `cleanup`, `steps`,
-`removeOrder`.
+`removeOrder`. A deploy role is on an app (Website Contributor, Container Apps Contributor) or on what an app
+deploys into (a container registry: AcrPush), each at that resource's scope only.
 
 ## The catalog
 
 | Kind | What it is |
 |---|---|
-| `appService` | An API (or any web app) on App Service Linux; managed identity, health check, deployed with OIDC. Runtime: any Azure offers now (.NET, Node, Python, Java, PHP; default .NET 10), with a warning when its support ends within a year |
+| `appService` | An API (or any web app) on App Service Linux; its own user-assigned identity, health check, deployed with OIDC. Runtime: any Azure offers now (.NET, Node, Python, Java, PHP; default .NET 10), with a warning when its support ends within a year |
 | `staticWebApp` | A front end on Static Web Apps (Free or Standard), deployed with its token |
-| `functionApp` | Azure Functions: Flex Consumption (its own plan) or on an App Service plan; state in a storage account through its identity. Runtime: any Azure offers now (default .NET 10 isolated), with a warning when its support ends within a year |
+| `functionApp` | Azure Functions: Flex Consumption (its own plan) or on an App Service plan; its own user-assigned identity; state in a storage account through it. Runtime: any Azure offers now (default .NET 10 isolated), with a warning when its support ends within a year |
+| `containerApp` | A containerised app (built from its Dockerfile, any language) on Azure Container Apps: its own user-assigned identity, HTTPS only, external or internal ingress, startup, liveness and readiness probes on its health path, optional Entra ID sign-in in front; deployed by its workflow (image built on the runner, tagged with the commit). The infrastructure never changes its image (below, "Container Apps"). Needs an environment and a registry: existing ones of the map or new ones |
+| `containerAppsEnvironment` | Where container apps run, like an App Service plan for many apps: a workload-profiles environment with the Consumption profile (per use, scales to zero); its logs go to a Log Analytics workspace of the map (existing or new) through a diagnostic setting, no shared key |
+| `containerRegistry` | An Azure Container Registry for the container apps' images (Basic by default; Standard, Premium): admin user and anonymous pull off; the apps pull with their identities (AcrPull), GitHub Actions pushes with OIDC (AcrPush). The name is global (`<name>.azurecr.io`) and checked |
+| `appIdentity` | Not added by hand: the user-assigned identity every app makes for itself (below, "Identity") |
 | `appServicePlan` | A Linux plan (new or shared) |
 | `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only (an admin you choose); the apps' database users are made by the step Database access (by client id, no directory rights needed; your address is let through the firewall for the step, asked first), with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo` (the connection's `dbGrants`: the procedures and functions the migrations create). In production a database keeps 35 days of point-in-time restore (Basic: 7, its limit) and long-term backups (weekly 4 weeks, monthly 12 months, yearly 5 years) |
 | `serviceBus` | A namespace with queues, no keys; the apps get Data Sender and/or Receiver |
@@ -272,7 +299,7 @@ Then `connections` (`host`, `role`, `sql`, `logs`, `telemetry`, `settings`, `dep
 | `storageQueue` | A queue of a storage account; the apps get a queue role on that queue only |
 | `storage` | StorageV2 without keys; the apps get the data roles you pick |
 | `keyVault` | RBAC vault; the apps get Key Vault Secrets User |
-| `appInsights`, `logAnalytics` | Telemetry for the apps that use it |
+| `appInsights`, `logAnalytics` | Telemetry for the apps that use it; Log Analytics also keeps a Container Apps environment's logs |
 
 **Several of one kind** (two APIs, two databases): add it again; each gets its own key, parameters,
 sections and sub application name (`<prefix>-api2-apiapp-<env>`); two resources of one Azure type can't
@@ -284,19 +311,133 @@ the apps that use it get) and, only for new behaviour, a handler in `azure-setup
 step) or `generate.ps1` (the fragment's values). Then `.\infra\generate.ps1`, a dry run, and a pull request
 to LazyBicep so every project gets it.
 
+## Identity
+
+Every app (App Service, Function App, Container App) signs in to Azure as **its own user-assigned managed
+identity**, and only as it. Why: [Managed identities](https://github.com/netmedia/lazybicep/blob/develop/docs/architecture/identities.md)
+in the LazyBicep repository.
+
+- **Made and removed with its app.** Adding an app adds its identity (`creates`: an `appIdentity` with the key
+  `<key>Identity`, its `owner` the app, the app's `identity` the identity), named after the app:
+  `{prefix}-{sub}-{apptype}-ident-{env}` (`contoso-shop-apiapp-ident-prod`). Removing the app removes it: the
+  app's role assignments first, then the app, then the identity.
+- **Never shared.** No other resource is offered it, and `generate.ps1` stops on an identity that isn't its
+  owner's. One per app per environment: test and production of one app are two identities.
+- **Its roles exist before the app starts.** Role assignments, Key Vault readers and SQL database users (by
+  the identity's client id) all go to the identity, which `main.bicep` makes before the app; the app waits for
+  them (`dependsOn`).
+
+What `main.bicep` gives every app:
+
+| Setting or property | Why |
+|---|---|
+| `identity: UserAssigned` with its identity only (no system-assigned identity) | The app signs in as its identity |
+| `AZURE_CLIENT_ID = {<key>Identity.clientId}` | `DefaultAzureCredential` in the app's code picks that identity |
+| App Service and Function App: `keyVaultReferenceIdentity` | Key Vault references are read as the identity |
+| Function App: `AzureWebJobsStorage__credential = managedidentity`, `AzureWebJobsStorage__clientId`; Flex Consumption: the deployment storage read as `UserAssignedIdentity` | The Functions host and the platform read the app's storage as the identity |
+| Function App: `<Name>__credential` and `<Name>__clientId` next to each identity-based connection to a resource of the map (`<Name>__fullyQualifiedNamespace`, `__queueServiceUri`, `__serviceUri`, `__accountName`...), unless the map sets them | Triggers and bindings sign in as the identity |
+| SQL connection strings: `User Id={<key>Identity.clientId}` (no password) | SqlClient's Entra authentication picks the identity |
+| Container App: the registry and its Key Vault secrets with the identity | The image pull (AcrPull) and the secrets use it |
+
+**`-Check` guards** (reported only, nothing changed): an `ident` identity in the environment's resource group
+that no app of the map owns (it keeps its roles; the command to delete it is shown), and a role on an app
+identity's own scope that lets someone attach it to another resource (Managed Identity Operator, Managed
+Identity Contributor, Contributor, Owner, User Access Administrator; roles inherited from the resource group or
+the subscription are not reported).
+
+**Maps from 0.1.0**: an app entry without `identity` still gets a system-assigned identity, and everything goes
+through that one as before. Remove the app and add it again to give it its own. **An imported app** (connect)
+that signs in as a system-assigned identity: the start adds its own identity, grants it the app's roles and
+switches the app to it; Azure deletes the old identity with the switch but not its role assignments, so the next
+steps list them (and the old identity's SQL database users) to remove by hand once the app works.
+
+## Container Apps
+
+A container app runs on Azure Container Apps with the same guarantees as the App Service apps: its own
+identity, no keys, Key Vault secrets, an optional Entra ID sign-in in front, and a generated workflow (OIDC)
+that builds and deploys its image. Why it is built this way: [Container Apps](https://github.com/netmedia/lazybicep/blob/develop/docs/architecture/container-apps.md)
+in the LazyBicep repository.
+
+Adding a `containerApp` asks: its source folder, Dockerfile and build context, port, vCPU and memory, replicas,
+revision mode, ingress, health path, sticky sessions and sign-in (`none` or `entra`); then which Container Apps
+environment and registry it uses (an existing one of the map, or new: a new environment asks its Log Analytics
+workspace the same way). In a new project one pick brings all of them. The app gets `AcrPull` on the
+registry, its identity, and the settings every app gets (`ASPNETCORE_ENVIRONMENT = {envName}`,
+`AZURE_CLIENT_ID`). GitHub Actions' app registration gets Container Apps Contributor on the app and `AcrPush`
+on its registry - re-added with every container app, so a registry the map already had gets it too.
+
+**The image belongs to the app's workflow, never to the infrastructure.** A new app is created with the
+public placeholder `mcr.microsoft.com/k8se/quickstart`, pinned by digest (`@sha256:…` in
+`catalog/containerApp.bicep`, never a tag: it runs with the app's identity attached) (port 80, no probes, no
+Key Vault secrets, no registry pull). Every later start reads the image Azure runs now and passes it back (`<key>Image`), so
+`main.bicep` and the app's deploys never undo each other. When the image can't be read, the template is not
+deployed (it would put the placeholder back). The app's own port, probes and Key Vault secrets come with its
+own image.
+
+**Key Vault secrets**: a setting whose whole value is `@Microsoft.KeyVault(VaultName={vault.name};SecretName=<name>)`
+or `{secret.<name>}` becomes a Container Apps secret by reference (`keyVaultUrl` and the app's identity) and
+the setting a `secretRef`: never a value in `main.bicep`. The app needs Key Vault Secrets User on that vault.
+A revision with a missing secret doesn't start, so the setup checks the secrets by name (never their values)
+and the next steps say how to put them in.
+
+**Sign-in** (`signIn`): Container Apps' built-in sign-in with Microsoft Entra ID, own tenant only, with the ID
+token (no client secret), token store off, HTTPS required. Its fields (the questions ask only the provider;
+the rest is set in the map):
+
+| Field | Meaning |
+|---|---|
+| `provider` | `entra`, or `none` (off). `"signIn": "entra"` takes the defaults |
+| `unauthenticated` | A request without sign-in: `redirect` (to the sign-in page, the default), `401` or `403` |
+| `excludedPaths` | Paths that pass without sign-in (endpoints with their own authentication). The health path always does, so with sign-in it is never `/` or `/*` (refused: the root is never anonymous); for each `/x/*` also `/x`, which the wildcard doesn't cover |
+| `identifierUri` | `true`: the app registration gets `api://<client id>`, and tokens for it are accepted too (applications that call the app) |
+| `appRoles` | App roles of the app registration: `{ value, allowed: ["Application" and/or "User"], displayName, description }`. Roles the map doesn't list are kept (removing one is by hand) |
+
+The setup's step **Sign-in app registrations** (after Azure resources, once the app has its address) makes or
+updates the app registration of each environment, each change asked: named after the app
+(`contoso-shop-contapp-prod`), this tenant only, redirect `https://<fqdn>/.auth/login/aad/callback`, ID tokens
+on, no client secret (one it finds is reported), the identifier URI and app roles from the map, its service
+principal with Assignment required and the Entra group asked per environment (`-` for none: nobody signs in
+until someone is assigned; guests in the group are reported). The client id and the group are saved with the
+environment's answers (`<key>SignInClientId`, `<key>SignInGroup`). A new client id runs `main.bicep` again
+in the same start (what-if first, asked), so the sign-in exists before the app's own image: with sign-in on,
+`main.bicep` gives the app its own image only once the client id is set. `-Check` compares the sign-in in Azure
+with the map; an app running its own image without sign-in is reported with how to take it offline
+(`az containerapp ingress disable`, never by turning the sign-in off).
+
+The step **First image** (after the GitHub environment) gives an app still on the placeholder its own image,
+once its sign-in is in front of it and its Key Vault secrets are in: it runs the app's workflow with
+`push-only` (on the environment's deploy branch, or the default branch for manual runs; the workflow must be
+pushed there), waits for the run, finds the image of the run's commit in the registry and deploys it with
+`main.bicep` (asked), so the app's settings, secrets and probes come with it. From then on the workflow
+deploys every new image by itself. Not yet possible (no GitHub CLI, secrets missing): the next steps say what
+to do, then start again.
+
+Removing a container app removes its identity and asks whether to delete its sign-in app registration (Entra
+keeps it restorable for 30 days); the environment and the registry stay until no container app of the map
+uses them, and the deploy role on the registry goes with the last app that deploys into it.
+
+**Limits for now**: the environment and the registry are in the app's resource group (not shared from
+another one); no custom domains and no private networking (VNet) for container apps; `deploy.migrate` is not
+supported in a container app's workflow (migrate from an App Service or Function App deploy).
+
 ## Naming
 
 `{prefix}-{sub}-{type}-{env}`; Application Insights `{prefix}-{sub}-{type}-{env}-insights`, a shared one
-`{prefix}-{sub}-{env}-insights`. All lowercase; the parts that are empty are left out; storage accounts
-without hyphens. The sub application name belongs to a deployment target (an API, a web app, a function
-app), asked for each. Types and environments are in `naming.json`.
+`{prefix}-{sub}-{env}-insights`; an app's own identity `{prefix}-{sub}-{apptype}-ident-{env}` (`identityPattern`;
+`{apptype}` is its app's naming type, so two apps without a sub application name never get the same one:
+`contoso-shop-apiapp-ident-prod`, `contoso-shop-func-ident-prod`). All lowercase; the parts that are empty are
+left out; storage accounts and container registries without hyphens. The sub application name belongs to a
+deployment target (an API, a web app, a function app, a container app), asked for each. Types and environments
+are in `naming.json`; the Container Apps types are `contapp` (2-32 characters), `contenv` (2-60) and `contreg`
+(5-50 letters and digits, globally unique), and `ident` the apps' identities. A `naming.json` from before 0.2.0
+without `identityPattern` gets the same pattern by default.
 
 ## Deploy workflows
 
 Each app's `deploy` in the map says **which folder, of which branch, is published where**, and
 `generate.ps1` makes its workflow `.github/workflows/<workflow>` from `catalog/workflows/<kind>.yml`
-(App Service .NET, Static Web App, Function app; generated files start with `# GENERATED`, never edit them,
-and a workflow written by hand is never overwritten):
+(App Service .NET, Static Web App, Function app, Container App; generated files start with `# GENERATED`,
+never edit them, and a workflow written by hand is never overwritten):
 
 | Field | Meaning |
 |---|---|
@@ -306,9 +447,10 @@ and a workflow written by hand is never overwritten):
 | `everyBranch` | Triggered on every branch (its tests run everywhere); deploys still only from an environment's branch. Without it: **the environments' deploy branches** (`environments/*.json`), so a new environment's branch goes into every trigger when its answers are saved |
 | `dotnet`, `project`, `publishArgs`, `test` | .NET: version, the project to publish, extra publish arguments, a test step run before (a job the deploy needs: a failing test stops the deploy; the step may have `env`, e.g. a feed key) |
 | `node`, `build`, `app`, `api`, `tokenFallback` | Static Web App: Node version, the build step (in `source`), the built site and its functions folders, an extra token secret |
+| `dockerfile`, `context` | Container App: the Dockerfile (from the repository root; default `<source>/Dockerfile`) and the folder `docker build` gets (default `.`, the repository root) |
 | `beforeBuild`, `afterDeploy` | The project's own steps (`{ name, id, env, run, workingDirectory, comment }`), e.g. a version step, a smoke test |
-| `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations"). Every app that shares the EF Core model migrates too: the bundle applies only what is pending, so the order of the deploys doesn't matter |
-| `env` | Environment of the build steps only (publish, migration bundle): `{ "TELERIK_NUGET_KEY": "${{ secrets.TELERIK_NUGET_KEY }}" }` for a package feed's key. Never the job's: the deploy actions don't see it |
+| `migrate` | The app that owns the EF Core migrations runs them before it deploys: `{ "project": "Core", "database": "<sqlDatabase key>", "connection": "ModelContext" }` (below, "Database migrations"). Every app that shares the EF Core model migrates too: the bundle applies only what is pending, so the order of the deploys doesn't matter. Not for a container app yet |
+| `env` | Environment of the build steps only (publish, migration bundle): `{ "TELERIK_NUGET_KEY": "${{ secrets.TELERIK_NUGET_KEY }}" }` for a package feed's key. Never the job's: the deploy actions don't see it. A container app's build gets them as BuildKit secrets (`--secret id=<NAME>,env=<NAME>`), never as build arguments, which stay in the image's history |
 
 Where it publishes: the push's branch belongs to an environment (`route.ps1` reads `environments/*.json`), and
 the workflow deploys to that environment's app: its name is the GitHub environment's variable
@@ -330,21 +472,39 @@ A manual run offers production last and preselects the first other environment. 
 environment runs at a time (`concurrency`). An App Service with a health check path waits after its deploy until
 the app answers it (200, up to 5 minutes), or the run fails: a green deploy means the app started.
 
+**A container app's workflow** (`catalog/workflows/containerApp.yml`): an optional test job (`test`, with
+`dotnet` for its .NET setup), the route job, then the deploy: the image built on the runner from `dockerfile`
+and `context`, pushed to the app's registry as `<key in lowercase words>:<commit SHA>` (`adminApi` ->
+`admin-api`), and only the app's image changed (`az containerapp update --image`): its settings, secrets,
+probes and sign-in stay as `main.bicep` made them. Then it waits until the new revision is ready and, with
+external ingress and a health path, the path answers 2xx (up to 5 minutes), or the run fails.
+
+- The GitHub environment's variables: `AZURE_<KEY>_NAME` and `AZURE_<KEY>_GROUP` (the app and its resource
+  group) and `AZURE_<REGISTRY>_NAME` (its registry). Without them the deploy is skipped with a notice.
+- Deploy roles of GitHub Actions' app registration: **AcrPush** on the registry and **Container Apps
+  Contributor** on the app, nothing wider (the image is built with Docker on the runner, not with
+  `az acr build`).
+- A manual run's input `push-only` only builds and pushes the image: the setup's step First image uses it. A
+  normal run refuses an app that still runs the placeholder (its first image goes in with `main.bicep`, which
+  sets its port, probes and secrets) and, with `signIn`, an app without its sign-in in front
+  (`az containerapp auth show`): the code never answers before the sign-in exists.
+
 **Production deploys from its branch only**: the setup doesn't accept `-` (manual runs) for it. Every deploy
 branch should be protected: the setup offers a repository ruleset (a reviewed pull request for every change, no
 force-push or deletion) when the branch has neither a ruleset nor classic protection. On GitHub plans without
 required reviewers for environments (private repositories below Enterprise) that branch is production's gate.
 
-**The apps run as their environment**: `ASPNETCORE_ENVIRONMENT` (App Service) and `AZURE_FUNCTIONS_ENVIRONMENT`
-(function apps) are the environment's name, capitalized (`{envName}`: `Production`, `Test`, `Staging`...; Linux's disk is
+**The apps run as their environment**: `ASPNETCORE_ENVIRONMENT` (App Service, Container Apps) and
+`AZURE_FUNCTIONS_ENVIRONMENT` (function apps) are the environment's name, capitalized (`{envName}`: `Production`, `Test`, `Staging`...; Linux's disk is
 case-sensitive, so `appsettings.Production.json` loads), so environment-specific settings
 files load and non-production behaviour (mail recipient overrides, no production alerts) applies. An environment
 named `development` makes `IsDevelopment()` true in Azure (developer-only switches, in Netmedia backends also
 migrations on startup): give deployed environments other names.
 
 and signs in to Azure with the GitHub environment's `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-`AZURE_SUBSCRIPTION_ID` (OIDC, `azure/login`); each app's name is a variable `AZURE_<KEY>_NAME`, a Static
-Web App's token the secret `AZURE_STATIC_WEB_APPS_API_TOKEN_<KEY>`.
+`AZURE_SUBSCRIPTION_ID` (OIDC, `azure/login`); each app's name is a variable `AZURE_<KEY>_NAME` (a container
+app's also `AZURE_<KEY>_GROUP` and `AZURE_<REGISTRY>_NAME`), a Static Web App's token the secret
+`AZURE_STATIC_WEB_APPS_API_TOKEN_<KEY>`.
 
 ### Database migrations
 
@@ -421,7 +581,10 @@ A step is `{ comment, name, if, id, uses, with, workingDirectory, shell, run }`;
 From the LazyBicep repository: `.\initintoproject.ps1 <project>\infra -Update`. It replaces the kit's
 files (`kit.json` lists them) and never touches the project's (`infra.map.json`, `naming.json`,
 `environments/`); then `.\infra\generate.ps1` shows whether `main.bicep` changes, and a dry run what that
-means in Azure. A project from when the kit was LazyAzure loses `lazyazure.ps1`, `lazyazure.exe` and
+means in Azure. `naming.json` is the project's, so an update doesn't change it: from 0.1.0 to 0.2.0, copy
+from the LazyBicep repository's `infra/naming.json` the types `contapp`, `contenv`, `contreg`, `ident` with their `maxLength`,
+`contapp` into `targets` and `contreg` into `noHyphens` before adding a container app. A project from when the
+kit was LazyAzure loses `lazyazure.ps1`, `lazyazure.exe` and
 `LAZYAZURE.md` (and the root's `lazyazure.exe`): `lazybicep.*` replaces them.
 
 ---

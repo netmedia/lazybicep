@@ -1,0 +1,24 @@
+{
+  "kind": "appIdentity",
+  "title": "App identity",
+  "about": "The user-assigned managed identity of one app (added and removed with it, never shared): the app signs in to Azure as it only, and its roles exist before the app starts.",
+  "addable": false,
+  "keyDefault": "appIdentity",
+  "naming": { "type": "ident" },
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (user-assigned managed identity)",
+    "type": "ident",
+    "target": "<target>",
+    "armType": "Microsoft.ManagedIdentity/userAssignedIdentities",
+    "ask": "own",
+    "apiVersion": "2023-01-31",
+    "param": "<key>Name",
+    "kind": "appIdentity",
+    "owner": "<owner>",
+    "role": "The managed identity <owner> signs in to Azure with (only it)"
+  },
+  "providers": ["Microsoft.ManagedIdentity"],
+  "removeOrder": { "types": ["Microsoft.ManagedIdentity/userAssignedIdentities"], "before": [] }
+}

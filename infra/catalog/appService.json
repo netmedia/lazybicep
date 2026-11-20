@@ -1,7 +1,7 @@
 {
   "kind": "appService",
   "title": "API (App Service)",
-  "about": "An API (or any web app) on App Service Linux, on an App Service plan of the map: managed identity, health check, no FTP or basic-auth publishing; deployed by GitHub Actions with OIDC.",
+  "about": "An API (or any web app) on App Service Linux, on an App Service plan of the map: its own user-assigned managed identity, health check, no FTP or basic-auth publishing; deployed by GitHub Actions with OIDC.",
   "addable": true,
   "app": true,
   "keyDefault": "api",
@@ -10,6 +10,9 @@
     { "id": "runtime", "label": "Runtime of <title> (linuxFxVersion)", "default": "DOTNETCORE|10.0", "runtimes": "web" },
     { "id": "source", "label": "Source folder of <title> (its code: a push there deploys it)", "default": "src/<Key>" },
     { "id": "health", "label": "Health check path of <title> ('-' for none)", "default": "/healthz" }
+  ],
+  "creates": [
+    { "kind": "appIdentity", "key": "<key>Identity", "title": "<title> identity", "target": "<target>", "owner": "<key>" }
   ],
   "requires": [
     { "kind": "appServicePlan", "question": "Which App Service plan does <title> run on?", "connection": { "kind": "host", "what": "runs on", "via": "serverFarmId" } }
@@ -27,15 +30,17 @@
     "apiVersion": "2024-04-01",
     "param": "<key>Name",
     "kind": "appService",
+    "identity": "<key>Identity",
     "runtime": "<q.runtime>",
     "healthCheckPath": "<q.health>",
-    "role": "<title> on App Service Linux: managed identity, no FTP or basic-auth publishing",
+    "role": "<title> on App Service Linux: its own user-assigned managed identity, no FTP or basic-auth publishing",
     "appSettings": [
-      { "name": "ASPNETCORE_ENVIRONMENT", "value": "{envName}" }
+      { "name": "ASPNETCORE_ENVIRONMENT", "value": "{envName}" },
+      { "name": "AZURE_CLIENT_ID", "value": "{<key>Identity.clientId}" }
     ],
     "deploy": { "workflow": "<key>.yml", "name": "<title>", "source": "<q.source>", "project": "<q.source>", "dotnet": "<q.runtime.version>.x" }
   },
   "github": { "deployRole": "Website Contributor", "variable": "AZURE_<KEY>_NAME" },
   "providers": ["Microsoft.Web"],
-  "removeOrder": { "types": ["Microsoft.Web/sites"], "before": ["Microsoft.Web/serverFarms"] }
+  "removeOrder": { "types": ["Microsoft.Web/sites"], "before": ["Microsoft.Web/serverFarms", "Microsoft.ManagedIdentity/userAssignedIdentities"] }
 }

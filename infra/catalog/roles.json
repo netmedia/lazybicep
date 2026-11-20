@@ -1,5 +1,5 @@
 {
-  "$comment": "Built-in Azure role definition ids, for the map's role connections (infra/generate.ps1). az role definition list --name '<role>' --query [].name (checked 2026-10-21)",
+  "$comment": "Built-in Azure role definition ids, for the map's role connections (infra/generate.ps1). az role definition list --name '<role>' --query [].name (checked 2026-10-21; AcrPull, AcrPush, Container Apps Contributor 2026-11-19)",
   "Storage Table Data Contributor": "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3",
   "Storage Queue Data Contributor": "974c5e8b-45b9-4653-ba55-5f855dd0fb88",
   "Storage Queue Data Message Sender": "c6a89b2d-59bc-44d0-9896-0f6e12d7b80a",
@@ -16,5 +16,8 @@
   "Key Vault Secrets User": "4633458b-17de-408a-b874-0445c86b69e6",
   "Key Vault Secrets Officer": "b86a8fe4-44ce-4948-aee5-eccb2c155cd7",
   "Monitoring Metrics Publisher": "3913510d-42f4-4e42-8a64-420c390055eb",
-  "Website Contributor": "de139f84-1756-47ae-9be6-808fbbe84772"
+  "Website Contributor": "de139f84-1756-47ae-9be6-808fbbe84772",
+  "AcrPull": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+  "AcrPush": "8311e382-0749-4cb8-b61a-304f252e45ec",
+  "Container Apps Contributor": "358470bc-b998-42bd-ab17-a7e34c199c0f"
 }

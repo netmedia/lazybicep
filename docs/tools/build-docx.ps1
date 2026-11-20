@@ -26,7 +26,7 @@ Also writes a PDF there.
 #>
 [CmdletBinding()]
 param(
-    [string]$Template = 'D:\Development\Netmedia\AIToolbelt\templates',
+    [string]$Template = 'D:\Development\Netmedia\AIToolbelt\plugins\netmedia-document\theme',
     [string]$Pdf
 )
 

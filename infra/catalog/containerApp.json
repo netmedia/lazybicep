@@ -1,0 +1,66 @@
+{
+  "kind": "containerApp",
+  "title": "Container App",
+  "about": "A containerised app (built from its Dockerfile, any language) on Azure Container Apps, in a Container Apps environment of the map: its own user-assigned managed identity pulls the image from a registry of the map and reads its Key Vault secrets, HTTPS only, optional Entra ID sign-in in front; deployed by GitHub Actions with OIDC (image built on the runner, tagged with the commit). The infrastructure never changes its image.",
+  "addable": true,
+  "app": true,
+  "keyDefault": "container",
+  "naming": { "type": "contapp" },
+  "questions": [
+    { "id": "source", "label": "Source folder of <title> (its code: a push there deploys it)", "default": "src/<Key>" },
+    { "id": "dockerfile", "label": "Dockerfile of <title> (from the repository root)", "default": "<q.source>/Dockerfile" },
+    { "id": "context", "label": "Build context of <title> (the folder docker build gets, '.' = the repository root)", "default": "." },
+    { "id": "port", "label": "Port <title> listens on in its container", "default": "8080" },
+    { "id": "cpu", "label": "vCPU of <title> (memory must be 2 GiB per vCPU)", "options": ["0.25", "0.5", "0.75", "1", "1.25", "1.5", "1.75", "2"], "default": "0.5" },
+    { "id": "memory", "label": "Memory of <title> (2 GiB per vCPU)", "options": ["0.5Gi", "1Gi", "1.5Gi", "2Gi", "2.5Gi", "3Gi", "3.5Gi", "4Gi"], "default": "1Gi" },
+    { "id": "minReplicas", "label": "Fewest replicas of <title> (0 = scales to zero when idle)", "default": "0" },
+    { "id": "maxReplicas", "label": "Most replicas of <title>", "default": "1" },
+    { "id": "revisionMode", "label": "Revisions of <title> (single: a deploy replaces the running one)", "options": ["single", "multiple"], "default": "single" },
+    { "id": "ingress", "label": "Ingress of <title> (external: from the internet, internal: from the environment only)", "options": ["external", "internal"], "default": "external" },
+    { "id": "health", "label": "Health path of <title> (startup, liveness and readiness probes; '-' for none)", "default": "/health" },
+    { "id": "sticky", "label": "Sticky sessions for <title> (a client stays on one replica: Blazor Server, SignalR; single revision mode only)", "options": ["no", "yes"], "default": "no" },
+    { "id": "signIn", "label": "Sign-in in front of <title> (Entra ID, by the platform)", "options": ["none", "entra"], "default": "none" }
+  ],
+  "creates": [
+    { "kind": "appIdentity", "key": "<key>Identity", "title": "<title> identity", "target": "<target>", "owner": "<key>" }
+  ],
+  "requires": [
+    { "kind": "containerAppsEnvironment", "field": "environment", "question": "Which Container Apps environment does <title> run in?", "connection": { "kind": "host", "what": "runs in", "via": "environmentId" } },
+    { "kind": "containerRegistry", "field": "registry", "question": "Which container registry holds the image of <title>?", "connection": { "kind": "role", "roles": ["AcrPull"], "what": "pulls its image", "via": "its managed identity (AcrPull)" } }
+  ],
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (2-32 lowercase letters, digits and hyphens)",
+    "type": "contapp",
+    "target": "<target>",
+    "targetLabel": "<title>",
+    "armType": "Microsoft.App/containerApps",
+    "ask": "own",
+    "apiVersion": "2025-07-01",
+    "param": "<key>Name",
+    "kind": "containerApp",
+    "identity": "<key>Identity",
+    "environment": "<environment>",
+    "registry": "<registry>",
+    "port": "<q.port>",
+    "cpu": "<q.cpu>",
+    "memory": "<q.memory>",
+    "minReplicas": "<q.minReplicas>",
+    "maxReplicas": "<q.maxReplicas>",
+    "revisionMode": "<q.revisionMode>",
+    "ingress": "<q.ingress>",
+    "sticky": "<q.sticky>",
+    "healthCheckPath": "<q.health>",
+    "signIn": { "provider": "<q.signIn>", "unauthenticated": "redirect", "excludedPaths": [], "identifierUri": false, "appRoles": [] },
+    "role": "<title> on Container Apps: its own user-assigned managed identity, HTTPS only, image from the registry",
+    "appSettings": [
+      { "name": "ASPNETCORE_ENVIRONMENT", "value": "{envName}" },
+      { "name": "AZURE_CLIENT_ID", "value": "{<key>Identity.clientId}" }
+    ],
+    "deploy": { "workflow": "<key>.yml", "name": "<title>", "source": "<q.source>", "dockerfile": "<q.dockerfile>", "context": "<q.context>" }
+  },
+  "github": { "deployRole": "Container Apps Contributor", "deployRoles": [{ "role": "AcrPush", "resource": "<registry>" }], "variable": "AZURE_<KEY>_NAME", "variables": { "AZURE_<KEY>_GROUP": "{<key>.group}" } },
+  "providers": ["Microsoft.App"],
+  "removeOrder": { "types": ["Microsoft.App/containerApps"], "before": ["Microsoft.App/managedEnvironments", "Microsoft.ContainerRegistry/registries", "Microsoft.ManagedIdentity/userAssignedIdentities"] }
+}

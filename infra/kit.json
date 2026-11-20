@@ -1,7 +1,7 @@
 {
   "$comment": "LazyBicep: the kit's version and the files that are the kit's (initintoproject.ps1 -Update replaces these; everything else in infra/ is the project's).",
   "name": "LazyBicep",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Netmedia",
   "web": "https://netmedia.agency",
   "email": "netmedia@netmedia.hr",
