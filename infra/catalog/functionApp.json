@@ -1,7 +1,7 @@
 {
   "kind": "functionApp",
   "title": "Function app",
-  "about": "Azure Functions on Linux: Flex Consumption (billed per use, its own plan) or on an App Service plan of the map. Its state is in a storage account it reaches with its managed identity (no keys); deployed by GitHub Actions with OIDC.",
+  "about": "Azure Functions on Linux: Flex Consumption (billed per use, its own plan) or on an App Service plan of the map. Its state is in a storage account it reaches with its own user-assigned managed identity (no keys); deployed by GitHub Actions with OIDC.",
   "addable": true,
   "app": true,
   "keyDefault": "func",
@@ -12,6 +12,7 @@
     { "id": "source", "label": "Source folder of <title> (its code: a push there deploys it)", "default": "src/<Key>" }
   ],
   "creates": [
+    { "kind": "appIdentity", "key": "<key>Identity", "title": "<title> identity", "target": "<target>", "owner": "<key>" },
     { "kind": "flexPlan", "key": "<key>Plan", "title": "<title> plan", "when": { "hosting": "flex" }, "connection": { "kind": "host", "what": "runs on", "via": "serverFarmId" } }
   ],
   "requires": [
@@ -31,12 +32,14 @@
     "apiVersion": "2024-04-01",
     "param": "<key>Name",
     "kind": "functionApp",
+    "identity": "<key>Identity",
     "runtime": "<q.runtime>",
     "stateStorage": "<stateStorage>",
-    "role": "Azure Functions with a managed identity",
+    "role": "Azure Functions with its own user-assigned managed identity",
     "appSettings": [
       { "name": "AzureWebJobsStorage__accountName", "value": "{<stateStorage>.name}" },
       { "name": "AZURE_FUNCTIONS_ENVIRONMENT", "value": "{envName}" },
+      { "name": "AZURE_CLIENT_ID", "value": "{<key>Identity.clientId}" },
       { "name": "FUNCTIONS_EXTENSION_VERSION", "value": "~4", "when": { "hosting": "plan" } },
       { "name": "FUNCTIONS_WORKER_RUNTIME", "value": "<q.runtime.name>", "when": { "hosting": "plan" } }
     ],
@@ -45,5 +48,5 @@
   },
   "github": { "deployRole": "Website Contributor", "variable": "AZURE_<KEY>_NAME" },
   "providers": ["Microsoft.Web", "Microsoft.Storage"],
-  "removeOrder": { "types": ["Microsoft.Web/sites"], "before": ["Microsoft.Web/serverFarms"] }
+  "removeOrder": { "types": ["Microsoft.Web/sites"], "before": ["Microsoft.Web/serverFarms", "Microsoft.ManagedIdentity/userAssignedIdentities"] }
 }

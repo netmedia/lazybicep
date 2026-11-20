@@ -4,14 +4,14 @@ How to install LazyBicep, add it to a project, and use it there. Reference for e
 
 ## Overview
 
-LazyBicep (v0.1.0) keeps a project's whole Azure infrastructure in **one map** (`infra/infra.map.json`) and sets it up, checks it, changes it and removes it environment by environment, from a terminal UI or plain PowerShell. Use it on every Netmedia project that runs on Azure.
+LazyBicep (v0.2.0) keeps a project's whole Azure infrastructure in **one map** (`infra/infra.map.json`) and sets it up, checks it, changes it and removes it environment by environment, from a terminal UI or plain PowerShell. Use it on every Netmedia project that runs on Azure.
 
 What you get:
 
 - **One source of truth** — the map lists the apps, databases, queues, vaults and telemetry, and how they connect (managed-identity roles, settings, deploy roles).
 - **`main.bicep` is generated** from the map and the catalog. Never edit it by hand.
 - **Safe runs** — every run does a what-if first and asks before each change; a second run with the same answers changes nothing.
-- **No secrets** — managed identities, Entra-only SQL, keyless Service Bus and storage, GitHub → Azure trust over OIDC.
+- **No secrets** — every app signs in as its own managed identity, Entra-only SQL, keyless Service Bus and storage, Key Vault for what remains, GitHub → Azure trust over OIDC.
 - **Generated GitHub Actions** — deploy workflows per app and build/CI workflows, all from the map.
 - **Cost estimate** — every mode shows the estimated monthly cost from Azure list prices (EUR by default).
 
@@ -150,6 +150,21 @@ The screenshots come from a demo project (the example spec, "Contoso Shop") and 
 
 ![LazyBicep finished dry run with open items](images/tui-run-done.png)
 
+## Identities and roles
+
+Every app (App Service, Function App, Container App) signs in to Azure as **its own user-assigned managed identity**. There is no password or key anywhere: Entra ID issues its tokens.
+
+| Rule | What it means for you |
+| --- | --- |
+| One per app per environment | Adding an app adds its identity (`<key>Identity` in the map, `contoso-shop-apiapp-ident-prod` in Azure); test and production of one app are two identities |
+| Made and removed with the app | Removing the app removes its role assignments, then the app, then the identity |
+| Never shared | No other resource is offered it; `generate.ps1` stops on an identity that isn't its owner's |
+| Roles before the first start | Roles, Key Vault access and SQL database users go to the identity, which exists before the app, so the app starts with them in place |
+
+The app's code finds the identity through `AZURE_CLIENT_ID` (`DefaultAzureCredential`); Key Vault references, the Functions host's storage and triggers, and SQL connection strings (`User Id=<client id>`) name it too; the map writes all of these. `-Check` reports an identity in the resource group that no app owns, and any role on an app's identity that would let someone attach it elsewhere.
+
+Maps made with 0.1.0 keep a system-assigned identity for their apps until an app is removed and added again; an imported app (connect) is switched to its own identity by the Start. Why the kit works this way: `docs/architecture/identities.md` in the LazyBicep repo.
+
 ## Workflows
 
 Each scenario below gives the UI path and the equivalent script command. Nothing touches Azure until a **Start**; building the map, dry runs and checks are always safe.
@@ -166,7 +181,7 @@ After `initintoproject`, open the UI (`.\lazybicep.exe`) and press `n`, or run `
 .\infra\analyze.ps1 -Out spec.json          # write it as an editable spec
 ```
 
-It reads files only (runs nothing) and suggests: .NET Web → App Service (runtime, health check path from `MapHealthChecks`); .NET isolated Functions → Function App (Flex Consumption); Blazor WASM or React/Angular/Vue/Vite etc. → Static Web App; Node/Python servers → App Service; SQL connection strings / EF Core → SQL database per connection-string name; Service Bus queues found in code; storage and storage queues; Key Vault; Application Insights. Project references count. Each suggestion shows what it was found from (`Add Shop (ShopDb) (sqlDatabase)? [Y/n]`), then the usual questions with the findings as defaults. Workers, Redis, Cosmos DB, topics, PostgreSQL etc. are reported but not added.
+It reads files only (runs nothing) and suggests: .NET Web → App Service (runtime, health check path from `MapHealthChecks`), or a Container App when a `Dockerfile` is in its folder (also for a Node or Python server; port from `EXPOSE`, one Container Apps environment and registry for all of them); .NET isolated Functions → Function App (Flex Consumption); Blazor WASM or React/Angular/Vue/Vite etc. → Static Web App; Node/Python servers → App Service; SQL connection strings / EF Core → SQL database per connection-string name; Service Bus queues found in code; storage and storage queues; Key Vault; Application Insights. Project references count. Each suggestion shows what it was found from (`Add Shop (ShopDb) (sqlDatabase)? [Y/n]`), then the usual questions with the findings as defaults. Workers, Redis, Cosmos DB, topics, PostgreSQL etc. are reported but not added.
 
 It also sorts every setting each App Service and Function App reads (settings files, `Configuration["..."]`, environment variables, triggers' `Connection` names) and offers them after the app's questions:
 
@@ -186,12 +201,12 @@ Only setting names are read out of the files, never their values.
 .\infra\import.ps1 -ResourceGroup contoso-shop-resgr-prod -List   # preview only
 ```
 
-Read-only. Pick the subscription, one or more resource groups, the resources and which environment they are. It reads runtimes, health checks, plans, SWA build folders, SQL databases, Service Bus and storage queues, Front Door origins, and each app's settings (matched by host name; values never shown or stored) and identity role assignments. Then choose:
+Read-only. Pick the subscription, one or more resource groups, the resources and which environment they are. It reads runtimes, health checks, plans, SWA build folders, SQL databases, Service Bus and storage queues, Front Door origins, container apps (environment, registry, ingress, size, probes, sign-in, Key Vault secret names), and each app's settings (matched by host name; values never shown or stored), identity and role assignments. A user-assigned identity of exactly one app becomes that app's; a shared one is reported. Then choose:
 
-- **connect** — the map takes over the existing resources with their real names. The first dry run asks every question once with those names as defaults; a Start then adds only what is missing (managed identities, roles, settings, security hardening, OIDC trust, GitHub environment, deploy workflows).
+- **connect** — the map takes over the existing resources with their real names. The first dry run asks every question once with those names as defaults; a Start then adds only what is missing (the apps' own identities, roles, settings, security hardening, OIDC trust, GitHub environment, deploy workflows). An app on a system-assigned identity is switched to its own; the next steps list the old identity's role assignments and SQL users to remove by hand.
 - **new** — the same resources are created fresh by the naming rules, keyless with managed identities. Move data and delete the old ones by hand.
 
-Kinds the catalog lacks are listed in `infra/new-kinds.md` (see scenario 13).
+Kinds the catalog lacks are listed in `infra/new-kinds.md` (see scenario 14).
 
 **1c. By hand** — pick resources one by one from the catalog. For each it asks what it needs (a database: which SQL server, or a new one), which apps use it, and for an app what it uses.
 
@@ -232,13 +247,15 @@ Environments: `prod`, `test`, `stag`, `dev`, `accp` (from `naming.json`).
    ```
 3. **Commit** `infra\` (map, `naming.json`, `main.bicep`, `environments\test.json`) and `.github\workflows`. The workflows read these files.
 
-A Start runs these steps in order: save answers to `environments/<env>.json` → Azure resources (what-if, deploy only on a real change) → apps' SQL database users (by managed-identity client id, with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo`; your IP is let through the firewall for the step, asked first) → monthly budget → GitHub → Azure OIDC trust → GitHub environment (variables, deployment tokens, deploy only from its branch; the branch offered a ruleset) → custom domains (DNS checked, free certificates) → live checks → a list of manual next steps.
+A Start runs these steps in order: save answers to `environments/<env>.json` → Azure resources (what-if, deploy only on a real change) → Sign-in app registrations (only for container apps with sign-in; scenario 10) → apps' SQL database users (by the client id of each app's identity, with `db_datareader`, `db_datawriter` and `EXECUTE` on `dbo`; your IP is let through the firewall for the step, asked first) → monthly budget → GitHub → Azure OIDC trust → GitHub environment (variables, deployment tokens, deploy only from its branch; the branch offered a ruleset) → First image (only for container apps still on the placeholder; scenario 10) → custom domains (DNS checked, free certificates) → live checks → a list of manual next steps.
 
 **Monthly budget.** After the cost estimate the run asks a monthly budget for the environment (default: the estimate ×1.5, in tens; `-` for none) and who gets its mails. The Budget step sets `monthly-<environment>` on the environment's resource group: mails at 80 % and 100 % of the month's spending and when the forecast passes it. It only alerts, nothing is stopped. A subscription that doesn't offer budgets shows the step as open; the rest of the run goes on.
 
 **Production.** Production deploys from a branch only (no manual-runs-only), and each deploy branch is offered a ruleset: changes through a reviewed pull request, no force-push or deletion (the repository's admins may bypass it). Production databases keep 35 days of point-in-time restore and long-term backups (weekly 4 weeks, monthly 12 months, yearly 5 years). The apps run as their environment: `ASPNETCORE_ENVIRONMENT` / `AZURE_FUNCTIONS_ENVIRONMENT` are `Production`, `Test`, `Staging`…, so `appsettings.Production.json` loads (an environment named `development` would turn on developer-only behaviour in Azure).
 
 ![The eight steps of a Start](images/diagram-start-steps.png)
+
+The diagram shows the steps every project has; the two container-app steps run only when the map has container apps.
 
 In a Run, `<` goes back to the previous question until the first change is made. Re-running with the same answers changes nothing.
 
@@ -276,7 +293,7 @@ Shows everything the setup created for that environment and deletes it only afte
 .\infra\azure-setup.ps1 -AddResource -Kind sqlDatabase   # UI: a on Home or Map
 ```
 
-It asks what the resource needs (e.g. which SQL server, or a new one) and which apps use it. Each app gets its roles and settings: a database user plus a password-less connection string `ConnectionStrings__<Key>`, Service Bus Data Sender/Receiver, Key Vault Secrets User, storage data roles, and so on. Adding an app asks its source folder and writes its deploy workflow. Then it updates the map and regenerates `main.bicep`.
+It asks what the resource needs (e.g. which SQL server, or a new one) and which apps use it. Each app gets its roles and settings on its own identity (see "Identities and roles" below): a database user plus a password-less connection string `ConnectionStrings__<Key>`, Service Bus Data Sender/Receiver, Key Vault Secrets User, storage data roles, and so on. Adding an app also adds its identity, asks its source folder and writes its deploy workflow. Then it updates the map and regenerates `main.bicep`.
 
 To put it into Azure: dry run, then Start, per environment (scenario 2). Commit the map, `main.bicep` and workflows.
 
@@ -287,6 +304,9 @@ Available kinds:
 | `appService` | API or web app on App Service Linux (.NET, Node, Python, Java, PHP; default .NET 10) |
 | `staticWebApp` | Front end on Static Web Apps (Free or Standard) |
 | `functionApp` | Azure Functions, Flex Consumption or on a plan (default .NET 10 isolated) |
+| `containerApp` | A containerised app from its Dockerfile on Azure Container Apps, optional Entra ID sign-in in front (scenario 10) |
+| `containerAppsEnvironment` | Where container apps run (Consumption profile), logs to Log Analytics |
+| `containerRegistry` | The container apps' images (Basic by default), no admin user or anonymous pull |
 | `appServicePlan` | Linux plan, new or shared |
 | `sqlServer`, `sqlDatabase` | Azure SQL, Entra sign-in only |
 | `serviceBus` | Namespace with queues, keyless |
@@ -314,11 +334,11 @@ Same picking as scenario 1b. Resources already in the map for that environment a
 .\infra\azure-setup.ps1 -RemoveResource -Key shopDb     # UI: Map, select it, x
 ```
 
-Takes it out of the map along with everything that refers to it (settings, roles, its workflow if it's an app) and regenerates `main.bicep`. It then offers to delete it from Azure: **no** by default; otherwise per environment you type its exact name (and `delete prod` for production). Only resources the setup made are deleted, never shared ones; role assignments go first; a Key Vault purge is asked separately.
+Takes it out of the map along with everything that refers to it (settings, roles, its workflow and its identity if it's an app) and regenerates `main.bicep`. It then offers to delete it from Azure: **no** by default; otherwise per environment you type its exact name (and `delete prod` for production). Only resources the setup made are deleted, never shared ones; an app's role assignments go first, then the app, then its identity (a container app's sign-in app registration is asked); a Container Apps environment or registry stays while a container app uses it; a Key Vault purge is asked separately.
 
 ### 9. Deploy code with the generated workflows
 
-Each app's `deploy` block in the map says which folder, from which branch, is published where. `generate.ps1` turns it into `.github/workflows/<workflow>` (App Service .NET, Static Web App, Function App templates).
+Each app's `deploy` block in the map says which folder, from which branch, is published where. `generate.ps1` turns it into `.github/workflows/<workflow>` (App Service .NET, Static Web App, Function App, Container App templates; a container app's workflow is in scenario 10).
 
 - **Push to an environment's deploy branch** → the workflow runs, `route.ps1` maps the branch to the environment, it signs in with OIDC (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` from the GitHub environment) and deploys to `AZURE_<KEY>_NAME`.
 - **Manual run** — pick the environment in the workflow's input.
@@ -331,7 +351,36 @@ Each app's `deploy` block in the map says which folder, from which branch, is pu
 
 ![How a push becomes a deploy](images/diagram-deploy.png)
 
-### 10. Add a CI / build workflow
+### 10. A container app
+
+A containerised app (any language, built from its Dockerfile) on Azure Container Apps. It runs in a **Container Apps environment** (like an App Service plan for many apps) and pulls its image from a **container registry**; both belong to the project, the app owns only itself and its identity. Example spec: `examples/spec.containerapp.json` in the LazyBicep repo.
+
+**Add it** (UI: `a` → Container App):
+
+```powershell
+.\infra\azure-setup.ps1 -AddResource -Kind containerApp
+```
+
+It asks the source folder, Dockerfile and build context, port, vCPU and memory (2 GiB per vCPU), replicas (0 = scales to zero), revision mode, ingress (external or internal), health path (its probes), sticky sessions and sign-in (`none` or `entra`); then which environment and registry it uses: pick existing ones or answer **new** (a new environment also asks its Log Analytics workspace). Which apps' resources it uses (Key Vault, Service Bus, storage, SQL) is asked as for any app. Sign-in details (excluded paths, `401` instead of the redirect, identifier URI, app roles) go into the app's `signIn` in the map by hand; see `infra/LAZYBICEP.md`, "Container Apps".
+
+**Dry run, then Start** (scenario 2). For a container app a Start does more than for an App Service:
+
+| Step | What happens | Why |
+| --- | --- | --- |
+| Azure resources | The app is created with the public placeholder image (`mcr.microsoft.com/k8se/quickstart:latest`, port 80) | The infrastructure never deploys code; a later Start passes back the image Azure runs, so it never undoes a deploy |
+| Sign-in app registrations | With `signIn`: the app registration named after the app (redirect, ID tokens, no client secret, Assignment required); you are asked the Entra group whose members may sign in in this environment. Then `main.bicep` runs again so the sign-in is in front of the app | The app's own code never answers before its sign-in exists |
+| GitHub environment | Variables `AZURE_<KEY>_NAME`, `AZURE_<KEY>_GROUP`, `AZURE_<REGISTRY>_NAME`; deploy roles AcrPush on the registry and Container Apps Contributor on the app | The workflow can push an image and change the app's image, nothing more |
+| First image | Runs the app's workflow with `push-only`, waits for it, then deploys the pushed image with `main.bicep` (its port, probes, settings and Key Vault secrets come with it) | Asked first; waits for the sign-in and for the app's Key Vault secrets |
+
+The app's workflow must already be on the branch it runs from (commit and push `.github/workflows` after adding the app). Missing Key Vault secrets: the next steps show `az keyvault secret set ... --file <a file only you can read> --encoding utf-8` (never `--value`, which ends up in the shell history), then start again.
+
+**Deploy by push.** From then on a push to the environment's branch (changes under the app's `source`) runs its workflow: the image is built on the GitHub runner, pushed to the registry tagged with the commit SHA, the app's image is updated (nothing else), and the run waits until the new revision is ready and its health path answers (up to 5 minutes). The workflow refuses an app that still runs the placeholder or, with sign-in, has no sign-in in front of it.
+
+**Check** shows each container app's image (placeholder or its own), its sign-in compared with the map, and its Key Vault secrets (by name). Never turn the sign-in off to debug: take the app offline with `az containerapp ingress disable` instead.
+
+Not yet: custom domains and private networking for container apps, an environment or registry from another resource group, `deploy.migrate` in a container app's workflow.
+
+### 11. Add a CI / build workflow
 
 Workflows that deploy no Azure resource (build, test, pack, publish a package) go into the map's `builds` array and are generated the same way.
 
@@ -347,24 +396,26 @@ Workflows that deploy no Azure resource (build, test, pack, publish a package) g
 
 Then `.\infra\generate.ps1` and commit. `"{environments}"` expands to every environment's deploy branch; no `branches` means manual runs only. To move an existing hand-written workflow under LazyBicep: describe it in `builds`, delete the file, generate, compare.
 
-### 11. Upgrade GitHub Actions versions everywhere
+### 12. Upgrade GitHub Actions versions everywhere
 
 All generated workflows reference actions by short name from `infra/catalog/workflows/actions.json` (e.g. `"checkout": "actions/checkout@v7"`). Change the version there (kit-wide via a LazyBicep PR, then `-Update`), run `.\infra\generate.ps1`, commit. Every workflow follows.
 
-### 12. Change naming conventions
+### 13. Change naming conventions
 
-Names follow `{prefix}-{sub}-{type}-{env}` (lowercase, empty parts dropped, storage accounts without hyphens; Application Insights adds `-insights`). Patterns, type and environment abbreviations, the default prefix and length limits live in the project's `infra/naming.json`. Edit it before the first Start of an environment; renaming existing resources means new resources in Azure.
+Names follow `{prefix}-{sub}-{type}-{env}` (lowercase, empty parts dropped, storage accounts and container registries without hyphens; Application Insights adds `-insights`). An app's identity is `{prefix}-{sub}-{apptype}-ident-{env}` (`identityPattern`), e.g. `contoso-shop-apiapp-ident-prod`. Patterns, type and environment abbreviations, the default prefix and length limits live in the project's `infra/naming.json`. Edit it before the first Start of an environment; renaming existing resources means new resources in Azure.
 
-### 13. A resource type the catalog doesn't have
+A kit update never changes the project's `naming.json`: a project from 0.1.0 copies the types `contapp`, `contenv`, `contreg` and `ident` (with their `maxLength`), `contapp` in `targets` and `contreg` in `noHyphens` from the LazyBicep repo's `infra/naming.json` before adding a container app.
 
-An import writes a ready-made prompt for each unsupported type (classic CDN, Redis, Cosmos DB, Container Apps, Service Bus topics…) into `infra/new-kinds.md`. To add the kind for everyone:
+### 14. A resource type the catalog doesn't have
+
+An import writes a ready-made prompt for each unsupported type (classic CDN, Redis, Cosmos DB, Service Bus topics…) into `infra/new-kinds.md`. To add the kind for everyone:
 
 1. Open Claude Code in the **LazyBicep repo** and paste the prompt from `new-kinds.md`.
 2. A kind = `catalog/<kind>.bicep` (fragment), `catalog/<kind>.json` (blueprint), and only for new behaviour a handler in `azure-setup.ps1` or `generate.ps1`.
 3. Test with `.\infra\generate.ps1` and a dry run, then open a PR to LazyBicep.
 4. In the project: `initintoproject.ps1 <project>\infra -Update`, then `-AddResource -Kind <kind>`.
 
-### 14. Other options
+### 15. Other options
 
 - `-Currency USD` (or GBP…) — cost estimate currency; EUR by default.
 - `-RefreshToken` (UI: `t`) — re-set the Static Web App deployment token in GitHub.
@@ -382,6 +433,11 @@ An import writes a ready-made prompt for each unsupported type (classic CDN, Red
 | Static Web App deploy fails with a token error | Run Start with `-RefreshToken` (UI: `t`), e.g. after resetting the token in the portal |
 | SQL "Database access" step can't connect | Allow it to add your IP to the firewall when asked; your account must be the SQL Entra admin you chose |
 | Runtime warning about end of support | Pick a newer runtime when asked; old ones Azure no longer offers (e.g. net8.0) are replaced by the closest newer one |
+| A container app still shows the placeholder page | It has no image of its own yet: commit and push its workflow, then run a Start (step First image), or run the workflow with `push-only` and Start again |
+| Container app workflow fails: "still runs the placeholder" or "no Entra ID sign-in yet" | Its first image and its sign-in come from a Start (steps First image and Sign-in app registrations); afterwards the workflow deploys by itself |
+| A container app's new revision doesn't start | Usually a Key Vault secret it references is missing: `-Check` lists them; put them in with `az keyvault secret set ... --file`, then restart the revision (the next steps give the command) |
+| Nobody can sign in to a container app | Its app registration requires an assignment: the Entra group asked in the Start must be assigned and the user a member of it (`-` means nobody yet) |
+| `-Check` reports an identity no app owns, or a role on an app's identity | An identity outside the map keeps its roles: delete it (command shown) once nothing uses it. A role on an app's identity lets its holder attach it to other resources: delete that role assignment (command shown) |
 | Someone changed things in the portal | `-Check` to see drift, `-Start` to restore what the map says |
 | I edited `main.bicep` / a `# GENERATED` workflow | Changes will be overwritten; put them in the map and run `.\infra\generate.ps1` |
 | Where do project notes go? | `infra/README.md`. `LAZYBICEP.md` is replaced on kit update |
@@ -404,6 +460,8 @@ An import writes a ready-made prompt for each unsupported type (classic CDN, Red
 | Add resource | `.\infra\azure-setup.ps1 -AddResource [-Kind <kind>]` | `a` |
 | Import into map | `.\infra\azure-setup.ps1 -AddResource -Import [-ResourceGroup <rg>]` | `a` → azure |
 | Remove resource | `.\infra\azure-setup.ps1 -RemoveResource -Key <key>` | Map → `x` |
+| Add a container app | `.\infra\azure-setup.ps1 -AddResource -Kind containerApp`, then push its workflow and Start | `a` |
+| Take a container app offline | `az containerapp ingress disable -g <rg> -n <app>` (never turn its sign-in off) | — |
 | Regenerate bicep + workflows | `.\infra\generate.ps1` | automatic |
 | Help | `<script> -Help` | `?` |
 

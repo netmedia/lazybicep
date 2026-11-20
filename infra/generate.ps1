@@ -25,9 +25,18 @@ apps' settings from their "appSettings" ({braces} become Bicep expressions), the
 then run this, and a dry run shows what would change in Azure.
 
 Values in {braces}: {<key>.name} (its name parameter), {<key>.host}, {<key>.id}, {<key>.connectionString}
-(Application Insights), {<key>.tableEndpoint} / queueEndpoint / blobEndpoint (storage), {<answer>} (a
-custom domain's parameter, e.g. {webDomain}), {secret.<name>} (a secret the setup keeps), {kvdns}
-(.vault.azure.net), {env}; 'a|b' takes b when a is empty (an unset domain, a resource that isn't used).
+(Application Insights), {<key>.tableEndpoint} / queueEndpoint / blobEndpoint (storage), {<key>.clientId} /
+principalId (an app's identity), {<answer>} (a custom domain's parameter, e.g. {webDomain}),
+{secret.<name>} (a secret the setup keeps), {kvdns} (.vault.azure.net), {env}; 'a|b' takes b when a is
+empty (an unset domain, a resource that isn't used).
+
+Every app signs in as its own user-assigned identity (an appIdentity of the map: the app's "identity", its
+"owner"): its roles, Key Vault reads, AZURE_CLIENT_ID and identity-based connection settings use it.
+
+A Container App (containerApp) runs the image main.bicep is given (<key>Image, the one Azure runs now; empty:
+the public placeholder) and never changes it; its Key Vault references become Container Apps secrets
+(keyVaultUrl + its identity) read through secretRef, and with "signIn" its platform sign-in (authConfigs) is
+made once <key>SignInClientId is set.
 
 .PARAMETER Check
 Only compares: exits with 1 when main.bicep isn't what the map makes (infra/azure-setup.ps1 checks this).
@@ -161,6 +170,8 @@ function Get-TokenBicep([string]$Token) {
                 'sqlServer' { return "'`${$($d.param)}`${environment().suffixes.sqlServerHostname}'" }
                 'serviceBus' { return "'`${$($d.param)}.servicebus.windows.net'" }
                 'appConfiguration' { return "'`${$($d.param)}.azconfig.io'" }
+                'containerApp' { return "$key.properties.configuration.ingress.fqdn" }
+                'containerRegistry' { return "$key.properties.loginServer" }
             }
             return "$key.properties.defaultHostName"
         }
@@ -168,6 +179,9 @@ function Get-TokenBicep([string]$Token) {
         'tableEndpoint' { return "$key.properties.primaryEndpoints.table" }
         'queueEndpoint' { return "$key.properties.primaryEndpoints.queue" }
         'blobEndpoint' { return "$key.properties.primaryEndpoints.blob" }
+        # An app's identity: its client id (AZURE_CLIENT_ID, <Name>__clientId, SQL's User Id) and principal.
+        'clientId' { if ($d.kind -eq 'appIdentity') { return "$key.properties.clientId" } }
+        'principalId' { if ($d.kind -eq 'appIdentity') { return "$key.properties.principalId" } }
     }
     Fail "{$Token}: $($parts[1]) isn't a value of a resource"
 }
@@ -209,7 +223,7 @@ function Get-PropName([string]$Name) { if ($Name -match '^[A-Za-z_][A-Za-z0-9_]*
 
 function Get-SettingsArray($Def, [string]$Indent) {
     $lines = @('[')
-    foreach ($s in @($Def.appSettings)) {
+    foreach ($s in @(Get-Settings $Def)) {
         if ($s.about) { $lines += "$Indent  // $($s.about)" }
         $lines += "$Indent  { name: $(Get-Quoted $s.name), value: $(Get-ValueBicep $s.value) }"
     }
@@ -217,11 +231,163 @@ function Get-SettingsArray($Def, [string]$Indent) {
 }
 function Get-SettingsObject($Def, [string]$Indent) {
     $lines = @('{')
-    foreach ($s in @($Def.appSettings)) {
+    foreach ($s in @(Get-Settings $Def)) {
         if ($s.about) { $lines += "$Indent  // $($s.about)" }
         $lines += "$Indent  $(Get-PropName $s.name): $(Get-ValueBicep $s.value)"
     }
     return ($lines + "$Indent}") -join "`n"
+}
+
+# --- the apps' identities ------------------------------------------------------------------------------
+
+# An app's own user-assigned identity: the appIdentity its "identity" names, owned by it ("owner"), never
+# another app's. $null for an app without one (a map from before LazyBicep 0.2.0: system-assigned).
+function Get-Identity($Def) {
+    if (-not $Def.identity) { return $null }
+    $id = Get-Def ([string]$Def.identity)
+    if (-not $id -or $id.kind -ne 'appIdentity') { Fail "$($Def.key): identity $($Def.identity) isn't an appIdentity of the map" }
+    if ([string]$id.owner -ne [string]$Def.key) { Fail "$($Def.key): identity $($id.key) is the identity of $($id.owner) (an app's identity is never shared)" }
+    return $id
+}
+# Who a role is given to: the principal of the app's identity, and the resource whose id names the assignment
+# (the identity's, so the assignment doesn't wait for the app).
+function Get-PrincipalExpr($Def) {
+    $id = Get-Identity $Def
+    if ($id) { return "$($id.key).properties.principalId" }
+    return "$($Def.key).identity.principalId"
+}
+function Get-PrincipalKey($Def) {
+    $id = Get-Identity $Def
+    if ($id) { return [string]$id.key }
+    return [string]$Def.key
+}
+# Identity-based connections: a setting <Name>__fullyQualifiedNamespace, __serviceUri, __accountName... whose
+# value is a resource of the map. A Function App with its own identity signs in there as it: <Name>__credential
+# = managedidentity and <Name>__clientId follow each (read by the Functions host, its triggers and bindings); a
+# sibling the map sets itself is kept as it is. App Service and Container Apps code signs in through
+# DefaultAzureCredential with AZURE_CLIENT_ID, so their apps get no siblings.
+$identityConnections = @('accountName', 'fullyQualifiedNamespace', 'serviceUri', 'blobServiceUri', 'queueServiceUri', 'tableServiceUri', 'endpoint', 'uri')
+function Get-Settings($Def) {
+    $id = Get-Identity $Def
+    if (-not $id) { return @($Def.appSettings) }
+    $settings = @($Def.appSettings | Where-Object { $_ })
+    if ($Def.kind -ne 'functionApp') { return $settings }
+    $have = @($settings | ForEach-Object { [string]$_.name })
+    $out = @()
+    foreach ($s in $settings) {
+        $out += $s
+        $name = [string]$s.name
+        $at = $name.LastIndexOf('__')
+        if ($at -lt 1 -or $name -like 'ConnectionStrings__*' -or $identityConnections -notcontains $name.Substring($at + 2)) { continue }
+        if (-not @([regex]::Matches([string]$s.value, '[{|](\w+)\.') | Where-Object { Get-Def $_.Groups[1].Value }).Count) { continue }
+        $prefix = $name.Substring(0, $at)
+        foreach ($p in @(@('credential', 'managedidentity'), @('clientId', "{$($id.key).clientId}"))) {
+            $n = "${prefix}__$($p[0])"
+            if ($have -contains $n) { continue }
+            $have += $n
+            $out += [pscustomobject]@{ name = $n; value = $p[1] }
+        }
+    }
+    return $out
+}
+# An app's identity in its fragment: {{identity}} under //#if identity (//#if systemIdentity: an older map's
+# system-assigned one), and {{dependsOn}}: what it waits for - $DependsOn, and with its own identity the
+# identity's role assignments and Key Vault reads, so they exist when it first starts.
+function Set-AppIdentity($Def, [hashtable]$V, [hashtable]$F, [string[]]$DependsOn) {
+    $id = Get-Identity $Def
+    $F.identity = [bool]$id
+    $F.systemIdentity = -not $id
+    $deps = @($DependsOn | Where-Object { $_ })
+    $roleDeps = @()
+    if ($id) {
+        $V.identity = [string]$id.key
+        $roleDeps += @($script:roleAssignments | Where-Object { $_.from.key -eq $Def.key } | ForEach-Object { $_.sym })
+        $roleDeps += @(Get-Links $Def.key 'role' | Where-Object { (Get-Def $_.to).kind -eq 'keyVault' } | ForEach-Object { "$($_.to)Access" } | Select-Object -Unique)
+    }
+    $V.dependsOn = ''
+    if ($roleDeps.Count) { $V.dependsOn = "  // Its identity's roles exist before it first starts.`n" }
+    if (($deps + $roleDeps).Count) { $V.dependsOn += "  dependsOn: [$((@($deps + $roleDeps)) -join ', ')]" }
+}
+
+# --- Container Apps -----------------------------------------------------------------------------------------
+
+# The public image a new Container App runs (port 80): main.bicep (catalog/containerApp.bicep) and the deploy
+# workflow know it. Pinned by digest, not a tag: it runs with the app's identity attached (AcrPull, Key Vault Secrets
+# User), so a changed image behind the same tag must never start there (digest looked up on MCR 2026-11-20).
+$containerPlaceholder = 'mcr.microsoft.com/k8se/quickstart@sha256:3a4d93c34c6753f24765ab17a36f1754aee9b02082b7d9553d17697b9e8252c4'
+# A key as a container name and image repository: lowercase, words joined with hyphens (adminApi -> admin-api).
+function Get-ContainerName([string]$Key) { return ($Key -creplace '([a-z0-9])([A-Z])', '$1-$2').ToLowerInvariant() }
+# A Container App's environment or registry: its field ("environment", "registry"), else its connection of that
+# kind; in this resource group (one shared from another group isn't supported yet).
+function Get-ContainerAppPart($Def, [string]$Field, [string]$Kind, [string]$LinkKind) {
+    $k = [string]$Def.$Field
+    if (-not $k) { $k = [string](@(Get-Links $Def.key $LinkKind | Where-Object { (Get-Def $_.to).kind -eq $Kind } | ForEach-Object { $_.to }) | Select-Object -First 1) }
+    $part = $null
+    if ($k) { $part = Get-Def $k }
+    if (-not $part -or $part.kind -ne $Kind) { Fail "$($Def.key) needs its $Field (a $Kind of the map)" }
+    if ($part.groupParam) { Fail "$($Def.key): a $Kind shared from another resource group isn't supported yet" }
+    return $part
+}
+# With "signIn" (provider entra; "entra" alone takes the defaults) the platform's sign-in is in front of the app.
+function Test-SignIn($Def) {
+    if (-not $Def.signIn) { return $false }
+    $provider = [string]$Def.signIn
+    if ($Def.signIn -isnot [string]) { $provider = [string]$Def.signIn.provider }
+    if (-not $provider -or $provider -eq 'none') { return $false }
+    if ($provider -ne 'entra') { Fail "$($Def.key): signIn provider $provider (only entra, or none)" }
+    return $true
+}
+# The paths a container app's sign-in leaves out (authConfigs excludedPaths), the one rule (import.ps1 and
+# azure-setup.ps1 compare a running app with the same list):
+#   1. its health path, when set and not '-' (the probes and the deploy reach it without sign-in);
+#   2. then each of signIn.excludedPaths in map order, and for each '/x/*' first '/x' (the wildcard doesn't cover it);
+#   3. de-duplicated (case-sensitive, the first one stays), order otherwise as above.
+# The root is never anonymous: a health path or an excluded path of '/' or '/*' fails.
+function Get-SignInExcludedPaths($Def) {
+    $key = [string]$Def.key
+    $paths = @()
+    $health = [string]$Def.healthCheckPath
+    if ($health -and $health -ne '-') {
+        if ($health -eq '/' -or $health -eq '/*') { Fail "${key}: healthCheckPath $health with sign-in would leave the whole app without sign-in (the health path is excluded from it): use a path of its own, e.g. /health" }
+        $paths += $health
+    }
+    if ($Def.signIn -isnot [string]) {
+        foreach ($p in @($Def.signIn.excludedPaths | Where-Object { $_ })) {
+            $p = [string]$p
+            if (-not $p.StartsWith('/') -or $p -eq '/*' -or $p -eq '/') { Fail "${key}: signIn.excludedPaths $p (a path from /, not all of them)" }
+            if ($p.EndsWith('/*')) { $paths += $p.Substring(0, $p.Length - 2) }
+            $paths += $p
+        }
+    }
+    $unique = @()
+    foreach ($p in $paths) { if ($unique -cnotcontains $p) { $unique += $p } }
+    # The caller wraps the result in @() (none or one path would otherwise not be a list).
+    return $unique
+}
+# A setting that reads a Key Vault secret: @Microsoft.KeyVault(VaultName={<vault>.name};SecretName=<name>) (one you
+# put in) or {secret.<name>} (one the setup keeps). A Container App gets it as a secret by reference (keyVaultUrl
+# + its identity), never as a value; $null for any other setting.
+function Get-ContainerSecret($Def, $Setting) {
+    $value = [string]$Setting.value
+    $vaultKey = ''
+    $secret = ''
+    if ($value -match '^@Microsoft\.KeyVault\(VaultName=\{(\w+)\.name\};SecretName=([A-Za-z0-9-]+)\)$') { $vaultKey = $Matches[1]; $secret = $Matches[2] }
+    elseif ($value -match '^\{secret\.([A-Za-z0-9-]+)\}$') {
+        $secret = $Matches[1]
+        $vaultKey = [string](@($defs | Where-Object { $_.kind -eq 'keyVault' -and @($_.secrets | Where-Object { $_ -and $_.name -eq $secret }).Count } | ForEach-Object { $_.key }) | Select-Object -First 1)
+        if (-not $vaultKey) { Fail "$($Def.key): setting $($Setting.name): no Key Vault of the map keeps the secret $secret" }
+    }
+    elseif ($value -match '@Microsoft\.KeyVault\(' -or $value -match '\{secret\.') {
+        Fail "$($Def.key): setting $($Setting.name): a container app reads a Key Vault secret only as the whole value, @Microsoft.KeyVault(VaultName={<vault>.name};SecretName=<name>) or {secret.<name>} (never a value in main.bicep)"
+    }
+    else { return $null }
+    $vault = Get-Def $vaultKey
+    if (-not $vault -or $vault.kind -ne 'keyVault') { Fail "$($Def.key): setting $($Setting.name): $vaultKey isn't a Key Vault of the map" }
+    if (-not @(Get-Links $Def.key 'role' | Where-Object { $_.to -eq $vaultKey -and @($_.roles) -contains 'Key Vault Secrets User' }).Count) {
+        Fail "$($Def.key) reads the secret $secret of $vaultKey but has no Key Vault Secrets User there (a role connection)"
+    }
+    # Container Apps secret names: lowercase letters, digits, '-' and '.'.
+    return [pscustomobject]@{ name = $secret.ToLowerInvariant(); url = "'https://`${$($vault.param)}`${environment().suffixes.keyvaultDns}/secrets/$secret'" }
 }
 
 # --- fragments -------------------------------------------------------------------------------------------
@@ -269,6 +435,7 @@ function Get-Section($Def) {
             $v.healthCheckPath = [string]$Def.healthCheckPath
             $f.health = [bool]$Def.healthCheckPath
             $v.settingsArray = Get-SettingsArray $Def '      '
+            Set-AppIdentity $Def $v $f @()
         }
         'staticWebApp' {
             $f.settings = [bool]@($Def.appSettings).Count
@@ -292,7 +459,114 @@ function Get-Section($Def) {
                 $v.container = ($key.ToLower() + '-packages')
             }
             $v.settingsArray = Get-SettingsArray $Def '      '
+            $packages = @()
+            if ($f.flex) { $packages = @("$($key)Packages") }
+            Set-AppIdentity $Def $v $f $packages
+            # The platform reads the deployment package as the app's identity.
+            $v.deploymentAuthentication = "{ type: 'SystemAssignedIdentity' }"
+            if ($f.identity) { $v.deploymentAuthentication = "{ type: 'UserAssignedIdentity', userAssignedIdentityResourceId: $($v.identity).id }" }
         }
+        'containerApp' {
+            if (-not (Get-Identity $Def)) { Fail "$key (containerApp) needs its own identity (an appIdentity of the map, its ""identity"")" }
+            $environment = Get-ContainerAppPart $Def 'environment' 'containerAppsEnvironment' 'host'
+            $registry = Get-ContainerAppPart $Def 'registry' 'containerRegistry' 'role'
+            if (-not @(Get-Links $key 'role' | Where-Object { $_.to -eq $registry.key -and @($_.roles) -contains 'AcrPull' }).Count) { Fail "$key needs AcrPull on $($registry.key) (a role connection: its identity pulls the image)" }
+            $v.environment = $environment.key
+            $v.registry = $registry.key
+            $v.image = "$($key)Image"
+            $v.signInClientId = "$($key)SignInClientId"
+            $v.containerName = Get-ContainerName $key
+            $inv = [Globalization.CultureInfo]::InvariantCulture
+            $port = 0
+            if (-not [int]::TryParse([string]$Def.port, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { Fail "${key}: port $($Def.port) (1-65535)" }
+            $v.port = [string]$port
+            # Consumption: 0.25 to 4 vCPU in steps of 0.25, with 2 GiB of memory per vCPU.
+            $cpu = 0.0
+            if (-not [double]::TryParse([string]$Def.cpu, [Globalization.NumberStyles]::Float, $inv, [ref]$cpu) -or $cpu -lt 0.25 -or $cpu -gt 4 -or ($cpu * 4) -ne [Math]::Floor($cpu * 4)) { Fail "${key}: cpu $($Def.cpu) (0.25 to 4 in steps of 0.25)" }
+            $memory = 0.0
+            if (-not ([string]$Def.memory -match '^([0-9.]+)Gi$') -or -not [double]::TryParse($Matches[1], [Globalization.NumberStyles]::Float, $inv, [ref]$memory) -or $memory -ne 2 * $cpu) {
+                Fail "${key}: cpu $($Def.cpu) needs memory $((2 * $cpu).ToString($inv))Gi (2 GiB per vCPU), not $($Def.memory)"
+            }
+            $v.cpu = $cpu.ToString($inv)
+            $v.memory = "$($memory.ToString($inv))Gi"
+            $min = 0; $max = 0
+            if (-not [int]::TryParse([string]$Def.minReplicas, [ref]$min) -or -not [int]::TryParse([string]$Def.maxReplicas, [ref]$max) -or $min -lt 0 -or $max -lt 1 -or $max -gt 1000 -or $min -gt $max) {
+                Fail "${key}: replicas $($Def.minReplicas)-$($Def.maxReplicas) (min 0 or more, max 1-1000, min <= max)"
+            }
+            $v.minReplicas = [string]$min
+            $v.maxReplicas = [string]$max
+            switch ([string]$Def.revisionMode) { 'single' { $v.revisionMode = 'Single' } 'multiple' { $v.revisionMode = 'Multiple' } default { Fail "${key}: revisionMode $($Def.revisionMode) (single or multiple)" } }
+            switch ([string]$Def.ingress) { 'external' { $v.external = 'true' } 'internal' { $v.external = 'false' } default { Fail "${key}: ingress $($Def.ingress) (external or internal)" } }
+            $v.affinity = 'none'
+            if (@('yes', 'true') -contains [string]$Def.sticky) {
+                if ($v.revisionMode -ne 'Single') { Fail "${key}: sticky sessions work in single revision mode only" }
+                $v.affinity = 'sticky'
+            }
+            $health = [string]$Def.healthCheckPath
+            $f.health = [bool]$health -and $health -ne '-'
+            if ($f.health -and -not $health.StartsWith('/')) { Fail "${key}: healthCheckPath $health (a path from /)" }
+            $v.healthPath = Get-Quoted $health
+            # Settings: values as they are; Key Vault secrets by reference (secretRef), in their own list - only the
+            # app's own image gets them (the hand secrets go into a new vault after the first start).
+            $envLines = @('[')
+            $secretEnvLines = @('[')
+            $secretRefs = [ordered]@{}
+            foreach ($s in @(Get-Settings $Def)) {
+                $ref = Get-ContainerSecret $Def $s
+                if ($ref) {
+                    if ($secretRefs.Contains($ref.name) -and $secretRefs[$ref.name].url -ne $ref.url) { Fail "${key}: two Key Vault secrets are both $($ref.name) in lowercase (a Container Apps secret's name)" }
+                    $secretRefs[$ref.name] = $ref
+                    if ($s.about) { $secretEnvLines += "  // $($s.about)" }
+                    $secretEnvLines += "  { name: $(Get-Quoted $s.name), secretRef: $(Get-Quoted $ref.name) }"
+                } else {
+                    if ($s.about) { $envLines += "  // $($s.about)" }
+                    $envLines += "  { name: $(Get-Quoted $s.name), value: $(Get-ValueBicep $s.value) }"
+                }
+            }
+            $v.settingsArray = ($envLines + ']') -join "`n"
+            $f.secrets = [bool]$secretRefs.Count
+            $v.secretsArray = ''
+            $v.secretSettingsArray = ''
+            $v.envExpr = "$($key)Settings"
+            if ($f.secrets) {
+                $v.secretsArray = "[`n" + ((@($secretRefs.Values | ForEach-Object { "  { name: $(Get-Quoted $_.name), keyVaultUrl: $($_.url), identity: $($Def.identity).id }" })) -join "`n") + "`n]"
+                $v.secretSettingsArray = ($secretEnvLines + ']') -join "`n"
+                $v.envExpr = "$($key)Real ? concat($($key)Settings, $($key)SecretSettings) : $($key)Settings"
+            }
+            # Its own image only when it has one (not the placeholder) and, with sign-in, once the sign-in exists.
+            $f.signIn = Test-SignIn $Def
+            $v.realExpr = "!empty($($v.image)) && $($v.image) != $($key)Placeholder"
+            $v.realComment = ''
+            if ($f.signIn) {
+                $v.realExpr += " && !empty($($v.signInClientId))"
+                $v.realComment = '// Behind sign-in: its own image only once the sign-in exists (a client id), never before.'
+                $v.redirectLine = ''
+                switch ([string]$Def.signIn.unauthenticated) {
+                    { @('', 'redirect') -contains $_ } { $v.unauthenticatedAction = 'RedirectToLoginPage'; $v.redirectLine = "      redirectToProvider: 'azureactivedirectory'" }
+                    '401' { $v.unauthenticatedAction = 'Return401' }
+                    '403' { $v.unauthenticatedAction = 'Return403' }
+                    default { Fail "${key}: signIn.unauthenticated $($Def.signIn.unauthenticated) (redirect, 401 or 403)" }
+                }
+                # The health path always (the deploy waits for it), and for each /x/* also /x (Get-SignInExcludedPaths).
+                $unique = @(Get-SignInExcludedPaths $Def)
+                $v.excludedPaths = '[' + ((@($unique | ForEach-Object { Get-Quoted $_ })) -join ', ') + ']'
+                $v.excludedNote = 'none'
+                if ($unique.Count) { $v.excludedNote = $unique -join ', ' }
+                $audiences = @($v.signInClientId)
+                if (@('true', 'yes') -contains [string]$Def.signIn.identifierUri) { $audiences += "'api://`${$($v.signInClientId)}'" }
+                $v.audiences = '[' + ($audiences -join ', ') + ']'
+            }
+            # Its logs from its first revision on; its identity's roles and Key Vault reads before it starts.
+            Set-AppIdentity $Def $v $f @("$($environment.key)Logs")
+        }
+        'containerAppsEnvironment' {
+            $ws = @(Get-Links $key 'logs') | Select-Object -First 1
+            if (-not $ws -or (Get-Def $ws.to).kind -ne 'logAnalytics') { Fail "$key needs a logs connection (its Log Analytics workspace)" }
+            $v.workspaceId = "$($ws.to)Id"
+            $v.workspaceName = [string](Get-Def $ws.to).param
+            $v.workspaceTitle = [string](Get-Def $ws.to).title
+        }
+        'appIdentity' { $v.owner = [string](Get-Def ([string]$Def.owner)).title }
         'sqlServer' {
             $v.adminLogin = [string]$Def.admin.loginParam
             $v.adminSid = [string]$Def.admin.sidParam
@@ -314,7 +588,7 @@ function Get-Section($Def) {
             foreach ($q in @($Def.queues | Where-Object { $_ })) {
                 $i++
                 $lines += ''
-                $lines += "resource $($key)Queue$i 'Microsoft.ServiceBus/namespaces/queues@2021-11-01' = {"
+                $lines += "resource $($key)Queue$i 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' = {"
                 $lines += "  parent: $key"
                 $lines += "  name: $(Get-Quoted $q)"
                 $lines += "  properties: { maxDeliveryCount: 10, lockDuration: 'PT1M', deadLetteringOnMessageExpiration: true }"
@@ -369,9 +643,11 @@ function Get-Section($Def) {
             $f.cache = $Def.cache -ne 'off'
         }
         'logAnalytics' {
-            $users = @(Get-LinksTo $key 'logs' | ForEach-Object { "$($_.from)New" })
+            # Needed by a new Application Insights (its <key>New), always by a Container Apps environment.
+            $users = @(Get-LinksTo $key 'logs' | ForEach-Object { if ((Get-Def $_.from).kind -eq 'appInsights') { "$($_.from)New" } else { 'true' } })
             $v.needed = 'false'
-            if ($users.Count) { $v.needed = $users -join ' || ' }
+            if ($users -contains 'true') { $v.needed = 'true' }
+            elseif ($users.Count) { $v.needed = $users -join ' || ' }
         }
         'appInsights' {
             $ws = @(Get-Links $key 'logs') | Select-Object -First 1
@@ -399,7 +675,7 @@ function Get-Section($Def) {
             $first = $v.name
             if ($readers.Count) { $first = (Get-Def $readers[0]).param }
             $v.accessName = "'vault-access-`${$first}'"
-            if ($readers.Count) { $v.readers = "[`n" + ((@($readers | ForEach-Object { "      { id: $_.id, principalId: $_.identity.principalId }" })) -join "`n") + "`n    ]" } else { $v.readers = '[]' }
+            if ($readers.Count) { $v.readers = "[`n" + ((@($readers | ForEach-Object { $r = Get-Def $_; "      { id: $(Get-PrincipalKey $r).id, principalId: $(Get-PrincipalExpr $r) }" })) -join "`n") + "`n    ]" } else { $v.readers = '[]' }
             $kept = @(@($Def.secrets) | Where-Object { $_ -and $_.by -eq 'setup' })
             if ($kept.Count) {
                 $v.secretValues = "{`n" + ((@($kept | ForEach-Object { "      $(Get-Quoted $_.name): $($_.param)" })) -join "`n") + "`n    }"
@@ -413,8 +689,35 @@ function Get-Section($Def) {
 
 # --- main.bicep --------------------------------------------------------------------------------------------
 
+# The role assignments of the apps' identities (Key Vault roles: in its module), numbered as main.bicep names
+# them: an app's section waits for its own.
+function Get-RoleAssignments {
+    $list = @()
+    $n = 0
+    foreach ($c in @($map.connections | Where-Object { $_.kind -eq 'role' })) {
+        $to = Get-Def $c.to
+        $from = Get-Def $c.from
+        if (-not $to -or -not $from) { Fail "role connection $($c.from) -> $($c.to): no such resource" }
+        if ($to.kind -eq 'keyVault') { continue }
+        if ($to.groupParam) { Fail "role connection $($c.from) -> $($c.to): roles on a resource that may be shared from another group aren't supported yet" }
+        foreach ($role in @($c.roles)) {
+            $id = $roles.$role
+            if (-not $id) { Fail "role '$role': not in catalog/roles.json" }
+            $n++
+            $list += [pscustomobject]@{ connection = $c; from = $from; to = $to; role = $role; id = $id; sym = "$($from.key)Role$n" }
+        }
+    }
+    return $list
+}
+
 function Get-Bicep {
     foreach ($d in $defs) { if (-not $d.kind) { Fail "$($d.key) has no kind" } }
+    # An app identity belongs to the one app that names it (and names it back as its owner).
+    foreach ($d in @($defs | Where-Object { $_.kind -eq 'appIdentity' })) {
+        $owner = Get-Def ([string]$d.owner)
+        if (-not $owner -or [string]$owner.identity -ne [string]$d.key) { Fail "$($d.key): no app of the map owns this identity (its owner $($d.owner) must name it as its identity)" }
+    }
+    $script:roleAssignments = @(Get-RoleAssignments)
     $out = New-Object Collections.Generic.List[string]
     $out.Add('// GENERATED by infra/generate.ps1 from infra/infra.map.json and infra/catalog/: don''t edit it here.')
     $out.Add('// Change the map (infra/README.md, "The map") or the catalog, then run .\infra\generate.ps1.')
@@ -478,30 +781,20 @@ function Get-Bicep {
 
     # Roles of the apps' managed identities (Key Vault roles: in its module above).
     $n = 0
-    foreach ($c in @($map.connections | Where-Object { $_.kind -eq 'role' })) {
-        $to = Get-Def $c.to
-        $from = Get-Def $c.from
-        if (-not $to -or -not $from) { Fail "role connection $($c.from) -> $($c.to): no such resource" }
-        if ($to.kind -eq 'keyVault') { continue }
-        if ($to.groupParam) { Fail "role connection $($c.from) -> $($c.to): roles on a resource that may be shared from another group aren't supported yet" }
-        foreach ($role in @($c.roles)) {
-            $id = $roles.$role
-            if (-not $id) { Fail "role '$role': not in catalog/roles.json" }
-            $n++
-            if ($n -eq 1) { $out.Add(''); $out.Add('// --- Roles of the apps'' managed identities ' + ('-' * 60)) }
-            $sym = "$($from.key)Role$n"
-            $out.Add('')
-            $out.Add("// $($from.title) -> $($to.title): $role$(if ($c.what) { " ($($c.what))" })")
-            $out.Add("resource $sym 'Microsoft.Authorization/roleAssignments@2022-04-01' = {")
-            $out.Add("  scope: $($to.key)")
-            $out.Add("  name: guid($($to.key).id, $($from.key).id, '$id')")
-            $out.Add('  properties: {')
-            $out.Add("    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '$id')")
-            $out.Add("    principalId: $($from.key).identity.principalId")
-            $out.Add("    principalType: 'ServicePrincipal'")
-            $out.Add('  }')
-            $out.Add('}')
-        }
+    foreach ($r in $script:roleAssignments) {
+        $n++
+        if ($n -eq 1) { $out.Add(''); $out.Add('// --- Roles of the apps'' managed identities ' + ('-' * 60)) }
+        $out.Add('')
+        $out.Add("// $($r.from.title) -> $($r.to.title): $($r.role)$(if ($r.connection.what) { " ($($r.connection.what))" })")
+        $out.Add("resource $($r.sym) 'Microsoft.Authorization/roleAssignments@2022-04-01' = {")
+        $out.Add("  scope: $($r.to.key)")
+        $out.Add("  name: guid($($r.to.key).id, $(Get-PrincipalKey $r.from).id, '$($r.id)')")
+        $out.Add('  properties: {')
+        $out.Add("    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '$($r.id)')")
+        $out.Add("    principalId: $(Get-PrincipalExpr $r.from)")
+        $out.Add("    principalType: 'ServicePrincipal'")
+        $out.Add('  }')
+        $out.Add('}')
     }
 
     $out.Add('')
@@ -510,6 +803,9 @@ function Get-Bicep {
             $out.Add("output $($d.key)HostName string = $($d.key).properties.defaultHostName")
             $out.Add("output $($d.key)VerificationId string = $($d.key).properties.customDomainVerificationId")
         } elseif ($d.kind -eq 'staticWebApp') { $out.Add("output $($d.key)HostName string = $($d.key).properties.defaultHostname") }
+        elseif ($d.kind -eq 'appIdentity') { $out.Add("output $($d.key)ClientId string = $($d.key).properties.clientId") }
+        elseif ($d.kind -eq 'containerApp') { $out.Add("output $($d.key)HostName string = $($d.key).properties.configuration.ingress.fqdn") }
+        elseif ($d.kind -eq 'containerRegistry') { $out.Add("output $($d.key)LoginServer string = $($d.key).properties.loginServer") }
         elseif ($d.kind -eq 'frontDoor') { $out.Add("output $($d.key)HostName string = $($d.key)Endpoint.properties.hostName") }
     }
     return (($out -join "`n") + "`n")
@@ -676,6 +972,13 @@ function Get-EfVersion([string]$Project, [string]$Dotnet) {
 function Get-MigrationConnection([string]$DatabaseKey) { return $DatabaseKey.Substring(0, 1).ToUpper() + $DatabaseKey.Substring(1) }
 function Get-MigrationVariable([string]$DatabaseKey) { return 'AZURE_' + ($DatabaseKey -creplace '([a-z0-9])([A-Z])', '$1_$2').ToUpper() + '_CONNECTION' }
 
+# The GitHub environment's variable whose value is $Value ({<key>.name}, {<key>.group}): its name in a workflow.
+function Get-WorkflowVariable([string]$Value, [string]$Key, [string]$What) {
+    $var = @($map.github.variables.PSObject.Properties | Where-Object { [string]$_.Value -eq $Value }) | Select-Object -First 1
+    if (-not $var) { Fail "${Key}: no github.variables entry with $Value ($What, for its workflow)" }
+    return [string]$var.Name
+}
+
 function Get-Workflows {
     $out = [ordered]@{}
     # A manual run offers production last and never preselects it: deploying there is a choice, not a default.
@@ -750,6 +1053,53 @@ function Get-Workflows {
             if ($dep.appComment) { $v.appComment = " # $($dep.appComment)" }
             if ($dep.apiComment) { $v.apiComment = " # $($dep.apiComment)" }
             $v.afterDeploy = Get-StepsYaml $dep.afterDeploy ''
+        } elseif ($d.kind -eq 'containerApp') {
+            # The image is built on the runner and pushed to the app's registry (AcrPush), then only the app's image
+            # changes (Container Apps Contributor). The environment's variables: the app's name and resource group,
+            # the registry's name.
+            $v.appVar = Get-WorkflowVariable "{$($d.key).name}" $d.key 'the app''s name'
+            $v.groupVar = Get-WorkflowVariable "{$($d.key).group}" $d.key 'the app''s resource group'
+            $registry = Get-ContainerAppPart $d 'registry' 'containerRegistry' 'role'
+            $v.registryVar = Get-WorkflowVariable "{$($registry.key).name}" $d.key "the name of its registry $($registry.key)"
+            if ($dep.migrate) { Fail "$($d.key): deploy.migrate isn't supported for a container app yet (migrate from an App Service or Function App deploy)" }
+            $v.repository = Get-ContainerName $d.key
+            $v.containerName = $v.repository
+            $v.placeholder = $containerPlaceholder
+            $dockerfile = [string]$dep.dockerfile
+            if (-not $dockerfile) { $dockerfile = (@([string]$dep.source, 'Dockerfile') | Where-Object { $_ }) -join '/' }
+            $context = [string]$dep.context
+            if (-not $context) { $context = '.' }
+            $v.dockerfile = Get-YamlQuoted $dockerfile
+            $v.context = Get-YamlQuoted $context
+            # The deploy's "env" (e.g. a package feed's key from a secret): BuildKit secrets of the build step only,
+            # never build arguments (those stay in the image's history).
+            $v.buildEnv = ''
+            $v.buildSecrets = ''
+            if ($dep.env) {
+                $names = @($dep.env.PSObject.Properties | ForEach-Object { $_.Name })
+                foreach ($n in $names) { if ($n -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "$($d.key): deploy.env $n isn't an environment variable name" } }
+                $v.buildEnv = (@($dep.env.PSObject.Properties | ForEach-Object { "          $($_.Name): $($_.Value)" })) -join "`n"
+                $v.buildSecrets = (@($names | ForEach-Object { " --secret id=$_,env=$_" })) -join ''
+            }
+            $f.test = [bool]$dep.test
+            $v.testStep = ''
+            $v.testSetup = ''
+            if ($dep.test) {
+                $v.testStep = Get-StepYaml $dep.test ''
+                if ($dep.dotnet) { $v.testSetup = "      - uses: $(Get-Action 'setup-dotnet')`n        with:`n          dotnet-version: $(Get-YamlQuoted ([string]$dep.dotnet))" }
+            }
+            $v.needs = 'route'
+            if ($f.test) { $v.needs = 'test, route' }
+            $v.beforeBuild = Get-StepsYaml $dep.beforeBuild 'steps.env.outputs.ready'
+            # A push-only run (the setup's step First image) ends after the push.
+            $v.afterDeploy = Get-StepsYaml $dep.afterDeploy 'steps.env.outputs.ready && !inputs.push-only'
+            # Never its own image before its sign-in exists.
+            $f.signIn = Test-SignIn $d
+            # The health wait: the new revision ready, and its health path answering when the runner can reach it.
+            $health = [string]$d.healthCheckPath
+            $v.healthPath = "''"
+            $v.healthNote = ''
+            if ($health -and $health -ne '-' -and [string]$d.ingress -ne 'internal') { $v.healthPath = Get-YamlQuoted $health; $v.healthNote = " and $health answers 2xx" }
         } else {
             # The app's name in the GitHub environment: the variable whose value is {<key>.name}.
             $var = @($map.github.variables.PSObject.Properties | Where-Object { [string]$_.Value -eq "{$($d.key).name}" }) | Select-Object -First 1

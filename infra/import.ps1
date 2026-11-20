@@ -32,8 +32,18 @@ Each resource of a kind the catalog has becomes a suggested resource, with what 
   Microsoft.OperationalInsights/workspaces Log Analytics workspace
   Microsoft.Cdn/profiles (Front Door)      Front Door, in front of the app its origin is (a classic CDN
                                            profile is noted: it is retired)
+  Microsoft.App/containerApps              Container App (its environment and registry, ingress, port, size,
+                                           replicas, revision mode, health path, sign-in settings, Key Vault
+                                           secret names; the image only as information)
+  Microsoft.App/managedEnvironments        Container Apps environment (its Log Analytics workspace)
+  Microsoft.ContainerRegistry/registries   Container registry (its SKU)
+  Microsoft.ManagedIdentity/userAssignedIdentities
+                                           no suggestion of its own: an identity of exactly one imported app
+                                           is that app's (connect keeps its real name); a shared one, or one
+                                           no app uses, is reported (shared identities aren't supported)
 What each app uses comes from its app settings and connection strings (matched by host names; values are
-never shown or kept) and from its managed identity's role assignments (which give its roles too).
+never shown or kept) and from its managed identity's role assignments (which give its roles too). An app
+with a system-assigned identity is noted: the start adds an app-owned user-assigned identity.
 
 A type the catalog has no kind for is reported, and infra/new-kinds.md gets a prompt for each (what to
 build, the resource's properties without secrets): paste it to Claude Code in the LazyBicep repository
@@ -142,8 +152,9 @@ function Show-Usage {
     & $g '  .\infra\import.ps1  -ResourceGroup <rg>[,<rg>...]  [-Subscription <sub>]  [-Out <spec.json>]'
     & $d '  Reads the resource groups (Azure CLI, read only) and suggests the map of a new project'
     & $d '  from their resources: apps with their runtimes, plans, SQL servers and databases,'
-    & $d '  Service Bus and its queues, storage and its queues, Key Vault, Application Insights;'
-    & $d '  what each app uses (its settings, its identity''s roles). Changes nothing.'
+    & $d '  Service Bus and its queues, storage and its queues, Key Vault, Application Insights,'
+    & $d '  Container Apps with their environment and registry; what each app uses (its settings,'
+    & $d '  its identity''s roles) and the identity it runs as. Changes nothing.'
     Write-Host ''
     & $b 'OPTIONS'
     & $y '  -ResourceGroup <rg>[,<rg>...]'
@@ -174,13 +185,40 @@ $ResourceGroup = @($ResourceGroup | ForEach-Object { $_.Split(',') } | ForEach-O
 # --- az ---------------------------------------------------------------------------------------------------
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'The Azure CLI is not installed: winget install Microsoft.AzureCLI, then a new terminal.' }
+# az on Windows is az.cmd, and PowerShell starts it through cmd.exe, which parses the arguments again (& | < > ^ ( )
+# run something else; PowerShell quotes an argument only when it has whitespace). Names here come from Azure and the
+# command line, so cmd.exe never sees them: az.cmd only runs "<its folder>\..\python.exe -IBm azure.cli %*"
+# (AZ_INSTALLER=MSI), and that python is started directly (as infra/azure-setup.ps1's Invoke-Native does). Without
+# it (another az), only arguments cmd.exe leaves alone are passed; a " or control character never.
+$script:azExe = [string](@(Get-Command az -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 | ForEach-Object { $_.Source })
+$script:azPython = ''
+if ($script:azExe -and [IO.Path]::GetFileName($script:azExe) -ieq 'az.cmd') {
+    $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetDirectoryName($script:azExe), '..', 'python.exe'))
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $script:azPython = $candidate }
+}
+function Assert-AzArguments([string[]]$Arguments) {
+    $batch = (-not $script:azPython) -and ($script:azExe -match '\.(cmd|bat)$')
+    foreach ($a in @($Arguments)) {
+        $s = [string]$a
+        if ($s -match '["\x00-\x1f\x7f]' -or ($s.Contains(' ') -and $s.EndsWith('\'))) { throw "refused: an az argument has a "", a control character or (with a space) a \ at its end: $($s -replace '[\x00-\x1f\x7f]', ' ')" }
+        if ($batch -and $s -cnotmatch '^[A-Za-z0-9 @._:/=,+~\\\[\]''?*{}$#-]*$' -and -not ($s.Contains(' ') -and $s -notmatch '[%!]')) { throw "refused: an argument for $($script:azExe) (a batch file, parsed again by cmd.exe) has a character cmd.exe would act on: $s" }
+    }
+}
 # JSON from az, or $null when it fails (no access, not found).
 function Get-AzJson([string[]]$Arguments) {
     $all = @($Arguments) + @('-o', 'json', '--only-show-errors')
     if ($script:sub) { $all += @('--subscription', $script:sub) }
+    Assert-AzArguments $all
     $prev = $ErrorActionPreference
+    $prevInstaller = $env:AZ_INSTALLER
     $ErrorActionPreference = 'Continue'
-    try { $out = & az @all 2>$null } finally { $ErrorActionPreference = $prev }
+    try {
+        if ($script:azPython) { $env:AZ_INSTALLER = 'MSI'; $out = & $script:azPython -IBm azure.cli @all 2>$null }
+        else { $out = & az @all 2>$null }
+    } finally {
+        $ErrorActionPreference = $prev
+        if ($script:azPython) { $env:AZ_INSTALLER = $prevInstaller }
+    }
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
     try { return (($out -join "`n") | ConvertFrom-Json) } catch { return $null }
 }
@@ -202,14 +240,16 @@ $kindOf = @{
     'microsoft.sql/servers' = 'sqlServer'; 'microsoft.servicebus/namespaces' = 'serviceBus'; 'microsoft.storage/storageaccounts' = 'storage'
     'microsoft.keyvault/vaults' = 'keyVault'; 'microsoft.insights/components' = 'appInsights'; 'microsoft.operationalinsights/workspaces' = 'logAnalytics'
     'microsoft.appconfiguration/configurationstores' = 'appConfiguration'
+    'microsoft.app/containerapps' = 'containerApp'; 'microsoft.app/managedenvironments' = 'containerAppsEnvironment'; 'microsoft.containerregistry/registries' = 'containerRegistry'
+    # An app's own identity is no suggestion of its own: an identity of exactly one imported app becomes that app's.
+    'microsoft.managedidentity/userassignedidentities' = 'appIdentity'
 }
-# What comes with other resources (Application Insights' smart detection, App Service's certificates...).
-$withOthers = @('microsoft.cdn/profiles/afdendpoints', 'microsoft.cdn/profiles/endpoints', 'microsoft.insights/actiongroups', 'microsoft.alertsmanagement/smartdetectoralertrules', 'microsoft.web/certificates', 'microsoft.insights/metricalerts', 'microsoft.portal/dashboards', 'microsoft.web/connections')
+# What comes with other resources (Application Insights' smart detection, App Service's certificates, an app's identity...).
+$withOthers = @('microsoft.managedidentity/userassignedidentities', 'microsoft.cdn/profiles/afdendpoints', 'microsoft.cdn/profiles/endpoints', 'microsoft.insights/actiongroups', 'microsoft.alertsmanagement/smartdetectoralertrules', 'microsoft.web/certificates', 'microsoft.insights/metricalerts', 'microsoft.portal/dashboards', 'microsoft.web/connections')
 # Missing kinds: a name for them and the usual abbreviation (Cloud Adoption Framework).
 $missingHints = @{
     'microsoft.cdn/profiles' = @('classic CDN profile (retired: move it to Front Door, the catalog''s frontDoor)', 'cdnp'); 'microsoft.cdn/profiles/endpoints' = @('CDN endpoint', 'cdne'); 'microsoft.cdn/profiles/afdendpoints' = @('Front Door endpoint', 'fde')
-    'microsoft.cache/redis' = @('Azure Cache for Redis', 'redis'); 'microsoft.documentdb/databaseaccounts' = @('Cosmos DB account', 'cosmos'); 'microsoft.managedidentity/userassignedidentities' = @('user-assigned managed identity', 'id')
-    'microsoft.app/containerapps' = @('Container App', 'ca'); 'microsoft.app/managedenvironments' = @('Container Apps environment', 'cae'); 'microsoft.containerregistry/registries' = @('container registry', 'cr')
+    'microsoft.cache/redis' = @('Azure Cache for Redis', 'redis'); 'microsoft.documentdb/databaseaccounts' = @('Cosmos DB account', 'cosmos')
     'microsoft.eventgrid/topics' = @('Event Grid topic', 'evgt'); 'microsoft.eventgrid/systemtopics' = @('Event Grid system topic', 'egst'); 'microsoft.eventhub/namespaces' = @('Event Hubs namespace', 'evhns')
     'microsoft.signalrservice/signalr' = @('SignalR Service', 'sigr'); 'microsoft.signalrservice/webpubsub' = @('Web PubSub', 'wps'); 'microsoft.dbforpostgresql/flexibleservers' = @('PostgreSQL flexible server', 'psql')
     'microsoft.dbformysql/flexibleservers' = @('MySQL flexible server', 'mysql'); 'microsoft.apimanagement/service' = @('API Management', 'apim'); 'microsoft.network/dnszones' = @('DNS zone', 'dnsz')
@@ -251,7 +291,7 @@ if ($List) {
     Show-Author
     Write-Host "  $($account.name): $($ResourceGroup -join ', ')" -ForegroundColor White
     foreach ($i in $items) {
-        $what = switch ($i.state) { 'kind' { $i.kind } 'with' { 'comes with another resource' } default { 'no kind in the catalog' } }
+        $what = switch ($i.state) { 'kind' { $i.kind } 'with' { if ($i.kind -eq 'appIdentity') { 'an app''s identity: goes with the app that uses it' } else { 'comes with another resource' } } default { 'no kind in the catalog' } }
         $color = switch ($i.state) { 'kind' { 'Green' } 'with' { 'DarkGray' } default { 'Yellow' } }
         Write-Host ("    {0,-28} {1,-48} {2}" -f $i.group, "$($i.name)", $what) -ForegroundColor $color
     }
@@ -283,7 +323,7 @@ if (-not $Environment) {
 # A name without its prefix, type and environment parts (contoso-shop-api-apiapp-prod -> api); $null when only
 # those are left (or a name without hyphens, like a storage account's).
 $noise = New-Object Collections.Generic.HashSet[string]
-foreach ($w in @('prod', 'production', 'test', 'stag', 'staging', 'dev', 'development', 'accp', 'acceptance', 'uat', 'qa', 'app', 'api', 'apiapp', 'webapp', 'web', 'func', 'fa', 'fn', 'functions', 'st', 'store', 'sql', 'sqldb', 'sqlserv', 'db', 'kv', 'vault', 'sb', 'sbns', 'sbus', 'bus', 'log', 'logs', 'law', 'appi', 'ai', 'insights', 'plan', 'asp', 'appplan', 'swa', 'stapp', 'statapp', 'rg', 'resgr', 'queue')) { [void]$noise.Add($w) }
+foreach ($w in @('prod', 'production', 'test', 'stag', 'staging', 'dev', 'development', 'accp', 'acceptance', 'uat', 'qa', 'app', 'api', 'apiapp', 'webapp', 'web', 'func', 'fa', 'fn', 'functions', 'st', 'store', 'sql', 'sqldb', 'sqlserv', 'db', 'kv', 'vault', 'sb', 'sbns', 'sbus', 'bus', 'log', 'logs', 'law', 'appi', 'ai', 'insights', 'plan', 'asp', 'appplan', 'swa', 'stapp', 'statapp', 'rg', 'resgr', 'queue', 'contapp', 'contenv', 'contreg', 'ident')) { [void]$noise.Add($w) }
 if ($naming) { foreach ($p in $naming.types.PSObject.Properties) { [void]$noise.Add($p.Name.ToLower()) } }
 $hyphenated = New-Object Collections.ArrayList
 foreach ($p in $picked) { if ($p.name -match '-') { [void]$hyphenated.Add([string[]]$p.name.ToLower().Split('-')) } }
@@ -320,7 +360,7 @@ function Get-FreeKey([string]$Want) {
     [void]$script:keys.Add($k)
     return $k
 }
-$keyDefaults = @{ appConfiguration = 'appConfig'; frontDoor = 'cdn'; appService = 'api'; functionApp = 'func'; staticWebApp = 'web'; appServicePlan = 'plan'; sqlServer = 'sqlServer'; sqlDatabase = 'db'; serviceBus = 'bus'; storage = 'storage'; storageQueue = 'queue'; keyVault = 'vault'; appInsights = 'insights'; logAnalytics = 'workspace' }
+$keyDefaults = @{ appConfiguration = 'appConfig'; frontDoor = 'cdn'; containerApp = 'app'; containerAppsEnvironment = 'contEnv'; containerRegistry = 'registry'; appService = 'api'; functionApp = 'func'; staticWebApp = 'web'; appServicePlan = 'plan'; sqlServer = 'sqlServer'; sqlDatabase = 'db'; serviceBus = 'bus'; storage = 'storage'; storageQueue = 'queue'; keyVault = 'vault'; appInsights = 'insights'; logAnalytics = 'workspace' }
 function Get-KeyFor([string]$Kind, [string]$Name, [switch]$Child) {
     $base = ''
     if ($Child) { $base = Get-KeyName $Name }
@@ -332,7 +372,7 @@ function Get-KeyFor([string]$Kind, [string]$Name, [switch]$Child) {
         if ($left.Count) { $base = Get-KeyName ($left -join '-') }
     }
     # A kind's usual key reads better than a name's leftover for the shared ones (one of them, mostly).
-    if (-not $base -or (@('appServicePlan', 'sqlServer', 'serviceBus', 'storage', 'keyVault', 'appInsights', 'logAnalytics') -contains $Kind -and -not @($picked | Where-Object { $_.kind -eq $Kind -and $_.name -ne $Name }).Count)) { $base = $keyDefaults[$Kind] }
+    if (-not $base -or (@('appServicePlan', 'sqlServer', 'serviceBus', 'storage', 'keyVault', 'appInsights', 'logAnalytics', 'containerAppsEnvironment', 'containerRegistry') -contains $Kind -and -not @($picked | Where-Object { $_.kind -eq $Kind -and $_.name -ne $Name }).Count)) { $base = $keyDefaults[$Kind] }
     return Get-FreeKey $base
 }
 
@@ -350,11 +390,167 @@ function New-Entry([string]$Kind, [string]$Key, [string]$Title, $Item) {
 }
 function Find-ById([string]$Id) { if ($Id -and $byId.ContainsKey($Id.ToLower())) { return $byId[$Id.ToLower()] } return $null }
 
-$order = @('logAnalytics', 'appInsights', 'storage', 'sqlServer', 'serviceBus', 'keyVault', 'appConfiguration', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
+# The identities (user-assigned) an app runs as, from its 'identity' (webapp / functionapp / containerapp show):
+# each with the principal that holds its roles; the system-assigned one apart.
+function Read-AppIdentity($E, $Identity) {
+    $E.Extra.principals = New-Object Collections.ArrayList
+    $E.Extra.identities = New-Object Collections.ArrayList
+    $E.Extra.principal = ''
+    if (-not $Identity) { return }
+    if ($Identity.principalId) { $E.Extra.principal = [string]$Identity.principalId; [void]$E.Extra.principals.Add([string]$Identity.principalId) }
+    if ($Identity.userAssignedIdentities) {
+        foreach ($u in @($Identity.userAssignedIdentities.PSObject.Properties)) {
+            [void]$E.Extra.identities.Add([pscustomobject]@{ id = ([string]$u.Name).ToLower(); name = ([string]$u.Name).Split('/')[-1]; principalId = [string]$u.Value.principalId })
+            if ($u.Value.principalId) { [void]$E.Extra.principals.Add([string]$u.Value.principalId) }
+        }
+    }
+}
+$order = @('logAnalytics', 'appInsights', 'storage', 'sqlServer', 'serviceBus', 'keyVault', 'appConfiguration', 'containerRegistry', 'containerAppsEnvironment', 'appServicePlan', 'appService', 'functionApp', 'containerApp', 'staticWebApp', 'frontDoor')
 foreach ($it in @($picked | Where-Object { $_.state -eq 'kind' } | Sort-Object @{ e = { $order.IndexOf([string]$_.kind) } }, name)) {
     $e = New-Entry $it.kind (Get-KeyFor $it.kind $it.name) $it.name $it
     switch ($it.kind) {
-        'logAnalytics' { }
+        'logAnalytics' {
+            # Its customer id: how a Container Apps environment names the workspace it logs to.
+            $w = Get-AzJson @('resource', 'show', '--ids', $it.id)
+            if ($w.properties.customerId) { $e.Extra.customerId = ([string]$w.properties.customerId).ToLower() }
+        }
+        'containerRegistry' {
+            $reg = Get-AzJson @('acr', 'show', '-g', $it.group, '-n', $it.name)
+            if ($reg.sku.name) { $e.Answers['sku'] = [string]$reg.sku.name }
+            $e.Extra.loginServer = ([string]$reg.loginServer).ToLower()
+            if (-not $e.Extra.loginServer) { $e.Extra.loginServer = "$($it.name).azurecr.io".ToLower() }
+            if ($reg.adminUserEnabled -eq $true) { Add-Note "$($it.name): the admin user is on; the catalog's registry has it off (and apps pull with their identity's AcrPull): a start turns it off, so check nothing pulls with the admin credentials first" }
+            if ($reg.anonymousPullEnabled -eq $true) { Add-Note "$($it.name): anonymous pull is on; the catalog's registry has it off" }
+            if ($reg.publicNetworkAccess -and [string]$reg.publicNetworkAccess -ne 'Enabled') { Add-Note "$($it.name): public network access is $($reg.publicNetworkAccess); the catalog has no private networking for a registry" }
+        }
+        'containerAppsEnvironment' {
+            $env_ = Get-AzJson @('containerapp', 'env', 'show', '-g', $it.group, '-n', $it.name)
+            $ep = $env_.properties
+            if (-not $ep) { $ep = $env_ }
+            # Its Log Analytics workspace: appLogsConfiguration's customerId, else its diagnostic settings (never the shared key).
+            $ws = $null
+            $logs = $ep.appLogsConfiguration
+            if ($logs -and [string]$logs.destination -eq 'log-analytics' -and $logs.logAnalyticsConfiguration.customerId) {
+                $cid = ([string]$logs.logAnalyticsConfiguration.customerId).ToLower()
+                $ws = @($entries | Where-Object { $_.Kind -eq 'logAnalytics' -and $_.Extra.customerId -eq $cid }) | Select-Object -First 1
+            } else {
+                $ds = Get-AzJson @('monitor', 'diagnostic-settings', 'list', '--resource', $it.id)
+                $wid = @(@($ds.value) + @($ds) | Where-Object { $_ -and $_.workspaceId } | ForEach-Object { [string]$_.workspaceId }) | Select-Object -First 1
+                if ($wid) { $ws = Find-ById $wid }
+            }
+            if ($ws) { $e.Requires['logAnalytics'] = $ws.Key }
+            else { [void]$e.Evidence.Add('its Log Analytics workspace isn''t picked here (or it logs elsewhere): one is asked') }
+            if ($ep.vnetConfiguration -and $ep.vnetConfiguration.infrastructureSubnetId) { Add-Note "$($it.name): runs in a virtual network; the catalog's environment has no private networking (a start makes one without it)" }
+            if (-not @($ep.workloadProfiles | Where-Object { $_ }).Count) { Add-Note "$($it.name): a Consumption-only environment (no workload profiles); the catalog's is a workload-profiles environment with the Consumption profile" }
+        }
+        'containerApp' {
+            $ca = Get-AzJson @('containerapp', 'show', '-g', $it.group, '-n', $it.name)
+            if (-not $ca) { [void]$e.Evidence.Add('the app can''t be read (no access?): its questions are asked') }
+            $cp = $ca.properties
+            if (-not $cp) { $cp = $ca }
+            Read-AppIdentity $e $ca.identity
+            $cfg = $cp.configuration
+            $tpl = $cp.template
+            $con = @($tpl.containers | Where-Object { $_ }) | Select-Object -First 1
+            if (@($tpl.containers | Where-Object { $_ }).Count -gt 1) { Add-Note "$($it.name): $(@($tpl.containers).Count) containers; the catalog's app has one (the first is read)" }
+            # Environment and registry (the apps are read after both).
+            $envId = [string]$cp.environmentId
+            if (-not $envId) { $envId = [string]$cp.managedEnvironmentId }
+            $ce = Find-ById $envId
+            if ($ce) { $e.Requires['containerAppsEnvironment'] = $ce.Key }
+            elseif ($envId) { [void]$e.Evidence.Add("its environment $($envId.Split('/')[-1]) isn't picked here: one is asked") }
+            foreach ($rg in @($cfg.registries | Where-Object { $_ })) {
+                $srv = ([string]$rg.server).ToLower()
+                $re = @($entries | Where-Object { $_.Kind -eq 'containerRegistry' -and $_.Extra.loginServer -eq $srv }) | Select-Object -First 1
+                if ($re) { if (-not $e.Requires.Contains('containerRegistry')) { $e.Requires['containerRegistry'] = $re.Key } }
+                else { [void]$e.Evidence.Add("pulls from $srv, which isn't a registry picked here: one is asked") }
+            }
+            # The image is information only: the setup reads the image Azure runs at start, the workflow changes it.
+            if ($con.image) { [void]$e.Evidence.Add("image $($con.image) (information only: the infrastructure never changes it; a start keeps the one running)") }
+            # Ingress, size, scale, revisions.
+            $ing = $cfg.ingress
+            if ($ing) {
+                if ($ing.targetPort) { $e.Answers['port'] = [string]$ing.targetPort }
+                if ($ing.external -eq $true) { $e.Answers['ingress'] = 'external' } else { $e.Answers['ingress'] = 'internal' }
+                if ($ing.stickySessions -and [string]$ing.stickySessions.affinity -eq 'sticky') { $e.Answers['sticky'] = 'yes' } else { $e.Answers['sticky'] = 'no' }
+                if ($ing.allowInsecure -eq $true) { Add-Note "$($it.name): plain HTTP is allowed; the catalog's app is HTTPS only" }
+                $e.Extra.host = ([string]$ing.fqdn).ToLower()
+            } else { Add-Note "$($it.name): no ingress; the catalog's app has one (internal or external)" }
+            if ($con.resources.cpu) { $e.Answers['cpu'] = ([string]$con.resources.cpu).Replace(',', '.') }
+            if ($con.resources.memory) { $e.Answers['memory'] = [string]$con.resources.memory }
+            if ($null -ne $tpl.scale.minReplicas) { $e.Answers['minReplicas'] = [string]$tpl.scale.minReplicas }
+            if ($null -ne $tpl.scale.maxReplicas) { $e.Answers['maxReplicas'] = [string]$tpl.scale.maxReplicas }
+            if ($cfg.activeRevisionsMode) { $e.Answers['revisionMode'] = ([string]$cfg.activeRevisionsMode).ToLower() }
+            if (@($tpl.scale.rules | Where-Object { $_ }).Count) { Add-Note "$($it.name): scale rules ($(@($tpl.scale.rules | ForEach-Object { $_.name }) -join ', ')) aren't in the catalog's app (replicas only): a start would drop them" }
+            # The health path: a liveness, startup or readiness probe's path.
+            $probePath = ''
+            foreach ($t in @('Liveness', 'Startup', 'Readiness')) {
+                $pr = @($con.probes | Where-Object { $_ -and [string]$_.type -eq $t -and $_.httpGet.path }) | Select-Object -First 1
+                if ($pr) { $probePath = [string]$pr.httpGet.path; break }
+            }
+            if ($probePath) { $e.Answers['health'] = $probePath } else { $e.Answers['health'] = '-' }
+            # Key Vault secrets: names only (the secret list is read without values), and the settings that use them.
+            $kv = New-Object Collections.ArrayList
+            $secretOf = @{}
+            foreach ($sc in @($cfg.secrets | Where-Object { $_ })) {
+                if ($sc.keyVaultUrl) { $secretOf[[string]$sc.name] = ([string]$sc.keyVaultUrl); [void]$kv.Add([string]$sc.name) }
+            }
+            $e.Extra.keyVaultSecrets = New-Object Collections.ArrayList
+            foreach ($var in @($con.env | Where-Object { $_ -and $_.secretRef })) {
+                if ($secretOf.ContainsKey([string]$var.secretRef)) {
+                    $url = $secretOf[[string]$var.secretRef]
+                    [void]$e.Extra.keyVaultSecrets.Add([ordered]@{ setting = [string]$var.name; secret = ($url -replace '^https://[^/]+/secrets/([^/]+).*$', '$1'); vault = ($url -replace '^https://([^/]+)/.*$', '$1').ToLower() })
+                }
+            }
+            if ($e.Extra.keyVaultSecrets.Count) { [void]$e.Evidence.Add("Key Vault secrets (names only): $((@($e.Extra.keyVaultSecrets | ForEach-Object { "$($_.setting) <- $($_.secret)" })) -join ', ')") }
+            $nonKv = @($cfg.secrets | Where-Object { $_ -and -not $_.keyVaultUrl })
+            if ($nonKv.Count) { Add-Note "$($it.name): $($nonKv.Count) secret(s) held in the app itself ($((@($nonKv | ForEach-Object { $_.name })) -join ', ')); the catalog's app keeps secrets in Key Vault: put them there (names only are read here)" }
+            # What it uses: its environment variables (by host name; the values stay here).
+            $settings = @()
+            foreach ($var in @($con.env | Where-Object { $_ -and $null -ne $_.value })) { $settings += [pscustomobject]@{ Name = [string]$var.name; Value = [string]$var.value } }
+            $e.Extra.settings = $settings
+            # Sign-in (authConfigs): whether it is on, what happens to unauthenticated requests, which paths it leaves out.
+            $au = Get-AzJson @('containerapp', 'auth', 'show', '-g', $it.group, '-n', $it.name)
+            if ($null -eq $au) { [void]$e.Evidence.Add('no sign-in (authConfigs) found or readable: it is asked') }
+            else {
+                $ap = $au.properties
+                if (-not $ap) { $ap = $au }
+                $enabled = $ap.platform.enabled -eq $true
+                # The map's signIn (provider, unauthenticated, excludedPaths: what generate.ps1 reads); the client id
+                # the sign-in runs with goes into the environment's answers (<key>SignInClientId), never into the map.
+                $sign = [ordered]@{ provider = 'entra' }
+                if ($enabled) {
+                    $ua = [string]$ap.globalValidation.unauthenticatedClientAction
+                    switch ($ua) { 'Return401' { $sign.unauthenticated = '401' } 'Return403' { $sign.unauthenticated = '403' } default { $sign.unauthenticated = 'redirect' } }
+                    # Azure's list is what generate.ps1 makes of the map's: the health path and, for each "/x/*", "/x"
+                    # come from it again, so they are left out; the root never passes without sign-in.
+                    $live = @($ap.globalValidation.excludedPaths | Where-Object { $_ } | ForEach-Object { [string]$_ })
+                    $paths = @()
+                    foreach ($p in $live) {
+                        if ($probePath -and $p -ceq $probePath) { continue }
+                        if ($live -ccontains "$p/*") { continue }
+                        if (-not $p.StartsWith('/') -or $p -eq '/' -or $p -eq '/*') { Add-Note "$($it.name): its sign-in leaves $p out; the map never leaves the whole app without sign-in (left out)"; continue }
+                        if ($paths -cnotcontains $p) { $paths += $p }
+                    }
+                    if ($probePath -eq '/' -or $probePath -eq '/*') { Add-Note "$($it.name): its health path $probePath passes without sign-in, so the whole app does: give it a path of its own (e.g. /health) - the map refuses it" }
+                    $sign.excludedPaths = @($paths)
+                    $aad = $ap.identityProviders.azureActiveDirectory
+                    $clientId = ''
+                    if ($aad -and $aad.registration -and [string]$aad.registration.clientId -match '^[0-9a-fA-F-]{36}$') { $clientId = [string]$aad.registration.clientId }
+                    if ($clientId) {
+                        # (az ad takes no --subscription)
+                        $keepSub = $script:sub
+                        $script:sub = ''
+                        try { $objectId = [string](Get-AzJson @('ad', 'app', 'show', '--id', $clientId, '--query', 'id')) } finally { $script:sub = $keepSub }
+                        $e.Extra.signInIds = [ordered]@{ clientId = $clientId; objectId = $objectId }
+                        [void]$e.Evidence.Add("sign-in's app registration $clientId (into the environment's answers, by its id)")
+                    }
+                    if (-not $aad) { Add-Note "$($it.name): sign-in is on with another provider than Entra ID; the catalog's sign-in is Entra ID" }
+                    [void]$e.Evidence.Add("sign-in on (Entra ID): unauthenticated -> $($sign.unauthenticated), excluded paths: $(if ($live.Count) { $live -join ', ' } else { 'none' })")
+                    if ($aad) { $e.Extra.signIn = $sign; $e.Answers['signIn'] = 'entra' }
+                } else { [void]$e.Evidence.Add('no sign-in (authConfigs off)') }
+            }
+        }
         'appInsights' {
             $c = Get-AzJson @('resource', 'show', '--ids', $it.id)
             $ws = Find-ById ([string]$c.properties.WorkspaceResourceId)
@@ -432,8 +628,8 @@ foreach ($it in @($picked | Where-Object { $_.state -eq 'kind' } | Sort-Object @
             $e.Extra.host = ([string]$site.defaultHostName).ToLower()
             $cfg = Get-AzJson @('webapp', 'config', 'show', '-g', $it.group, '-n', $it.name)
             $plan = Find-ById ([string]$site.serverFarmId)
-            $e.Extra.principal = [string]$site.identity.principalId
-            if (-not $e.Extra.principal) { [void]$e.Evidence.Add('no managed identity: the catalog''s apps sign in with one') }
+            Read-AppIdentity $e $site.identity
+            if (-not $e.Extra.principals.Count) { [void]$e.Evidence.Add('no managed identity: the catalog''s apps sign in with their own user-assigned one (a start adds it)') }
             if ([string]$site.kind -notmatch 'linux') { Add-Note "$($it.name): a Windows app; the catalog's apps run on Linux (its runtime is asked)" }
             if ($it.kind -eq 'appService') {
                 if ($cfg.linuxFxVersion) { $e.Answers['runtime'] = [string]$cfg.linuxFxVersion }
@@ -491,7 +687,7 @@ foreach ($it in @($picked | Where-Object { $_.state -eq 'kind' } | Sort-Object @
 }
 
 # Apps: the resources their settings name, and their identities' role assignments.
-$apps = @($entries | Where-Object { @('appService', 'functionApp') -contains $_.Kind })
+$apps = @($entries | Where-Object { @('appService', 'functionApp', 'containerApp') -contains $_.Kind })
 foreach ($a in $apps) {
     foreach ($s in @($a.Extra.settings)) {
         $v = ([string]$s.Value).ToLower()
@@ -514,17 +710,53 @@ foreach ($a in $apps) {
         }
     }
 }
-$principals = @($apps | Where-Object { $_.Extra.principal })
+# A container app's Key Vault secrets name the vault they come from.
+foreach ($a in @($apps | Where-Object { $_.Kind -eq 'containerApp' })) {
+    foreach ($ks in @($a.Extra.keyVaultSecrets)) {
+        $vault = @($entries | Where-Object { $_.Kind -eq 'keyVault' -and $_.Hosts -contains [string]$ks.vault }) | Select-Object -First 1
+        if ($vault -and $a.Uses -notcontains $vault.Key) { [void]$a.Uses.Add($vault.Key); [void]$vault.Evidence.Add("$($a.Name): Key Vault secret $($ks.secret)") }
+    }
+}
+# Identities: a user-assigned identity of exactly one imported app is that app's (connect keeps its real name);
+# one used by several apps (shared) is not supported; a system-assigned one is replaced at the start.
+$identityNames = [ordered]@{}
+$identityUse = @{}
+foreach ($a in $apps) { foreach ($i in @($a.Extra.identities)) { if (-not $identityUse.ContainsKey($i.id)) { $identityUse[$i.id] = New-Object Collections.ArrayList }; [void]$identityUse[$i.id].Add($a) } }
+foreach ($a in $apps) {
+    $own = @($a.Extra.identities | Where-Object { $identityUse[$_.id].Count -eq 1 })
+    $shared = @($a.Extra.identities | Where-Object { $identityUse[$_.id].Count -gt 1 })
+    if ($own.Count) {
+        $identityNames["$($a.Key)Identity"] = $own[0].name
+        [void]$a.Evidence.Add("runs as its own user-assigned identity $($own[0].name): kept as its identity (connect)")
+        if ($own.Count -gt 1) { Add-Note "$($a.Name): $($own.Count) user-assigned identities; the catalog's app has one, $($own[0].name) is kept: move the roles and SQL users of $(@($own | Select-Object -Skip 1 | ForEach-Object { $_.name }) -join ', ') to it, then remove them" }
+    }
+    foreach ($s in $shared) {
+        # One note per shared identity (the first app of its users writes it).
+        if ($identityUse[$s.id][0] -eq $a) { Add-Note "the identity $($s.name) is shared by $(@($identityUse[$s.id] | ForEach-Object { $_.Name }) -join ', '): shared identities aren't supported (one identity per app); a start adds each of these apps its own identity and switches it; the shared identity's role assignments and SQL users stay until you remove them by hand" }
+        [void]$a.Evidence.Add("runs as the shared identity $($s.name): a start adds the app's own user-assigned identity and switches the app to it")
+    }
+    if (-not $own.Count -and $a.Extra.principal) {
+        [void]$a.Evidence.Add('system-assigned identity: a start adds the app''s own user-assigned identity and switches the app to it; remove the old identity''s role assignments and SQL users by hand afterwards (the next steps list them)')
+        if (-not $shared.Count) { Add-Note "$($a.Name): runs as its system-assigned identity; a start adds an app-owned user-assigned identity and switches the app to it" }
+    }
+}
+# Identities in the groups that no imported app uses.
+foreach ($i in @($items | Where-Object { $_.kind -eq 'appIdentity' })) {
+    if (-not $identityUse.ContainsKey($i.id.ToLower())) { Add-Note "$($i.name) (identity, $($i.group)): no imported app runs as it; it is not imported (each app of the map gets its own identity)" }
+}
+$principals = @($apps | Where-Object { $_.Extra.principals.Count })
 if ($principals.Count) {
     $assignments = Get-AzJson @('role', 'assignment', 'list', '--all')
     if ($null -eq $assignments) { Add-Note 'the role assignments can''t be read: the apps'' roles are asked' }
     foreach ($ra in @($assignments | Where-Object { $_ })) {
-        $a = @($principals | Where-Object { $_.Extra.principal -eq [string]$ra.principalId }) | Select-Object -First 1
+        $a = @($principals | Where-Object { $_.Extra.principals -contains [string]$ra.principalId }) | Select-Object -First 1
         if (-not $a) { continue }
         $scope = ([string]$ra.scope).ToLower()
         $r = Find-ById $scope
         if (-not $r) { $r = @($entries | Where-Object { $_.Extra.scope -eq $scope }) | Select-Object -First 1 }
         if (-not $r -or $r.Key -eq $a.Key) { continue }
+        # A container app's registry (AcrPull) and environment come with it.
+        if ($a.Kind -eq 'containerApp' -and @('containerRegistry', 'containerAppsEnvironment') -contains $r.Kind) { continue }
         # The Function App's own storage roles come with it.
         if ($a.Kind -eq 'functionApp' -and $r.Kind -eq 'storage' -and $a.Requires['storage'] -eq $r.Key) { continue }
         if ($a.Uses -notcontains $r.Key) { [void]$a.Uses.Add($r.Key) }
@@ -630,19 +862,28 @@ $resources = New-Object Collections.ArrayList
 $names = [ordered]@{ resourceGroup = $MainGroup }
 $groups = [ordered]@{}
 $extraNames = New-Object Collections.ArrayList
-$kindOrder = @('logAnalytics', 'appInsights', 'storage', 'storageQueue', 'sqlServer', 'sqlDatabase', 'serviceBus', 'keyVault', 'appConfiguration', 'appServicePlan', 'appService', 'functionApp', 'staticWebApp', 'frontDoor')
+$signInIds = [ordered]@{} # key -> the client id (and object id) a container app's sign-in runs with
+$kindOrder = @('logAnalytics', 'appInsights', 'storage', 'storageQueue', 'sqlServer', 'sqlDatabase', 'serviceBus', 'keyVault', 'appConfiguration', 'containerRegistry', 'containerAppsEnvironment', 'appServicePlan', 'appService', 'functionApp', 'containerApp', 'staticWebApp', 'frontDoor')
 foreach ($e in @($entries | Sort-Object @{ e = { $kindOrder.IndexOf($_.Kind) } })) {
     $r = [ordered]@{ kind = $e.Kind; key = $e.Key; title = $e.Title }
     if ($e.Answers.Count) { $r.answers = $e.Answers }
     if ($e.Requires.Count) { $r.requires = $e.Requires }
     if ($e.Uses.Count) { $r.uses = @($e.Uses) }
     if ($e.Roles.Count) { $ro = [ordered]@{}; foreach ($k in $e.Roles.Keys) { $ro[$k] = @($e.Roles[$k]) }; $r.roles = $ro }
+    # An app's identity (the map's <key>Identity, its real name in the environment's names), for reading, and
+    # a container app's sign-in and Key Vault secret names (only for reading too: never values).
+    if ($identityNames.Contains("$($e.Key)Identity")) { $r.identity = [ordered]@{ key = "$($e.Key)Identity"; azureName = $identityNames["$($e.Key)Identity"] } }
+    elseif ($e.Extra.principal -and @('appService', 'functionApp', 'containerApp') -contains $e.Kind) { $r.identity = [ordered]@{ systemAssigned = $true } }
+    if ($e.Extra.signIn) { $r.signIn = $e.Extra.signIn }
+    if ($e.Extra.keyVaultSecrets -and $e.Extra.keyVaultSecrets.Count) { $r.keyVaultSecrets = @($e.Extra.keyVaultSecrets) }
     $r.evidence = @($e.Evidence)
     $r.azureName = $e.Name
     [void]$resources.Add($r)
     $names[$e.Key] = $e.Name
+    if ($identityNames.Contains("$($e.Key)Identity")) { $names["$($e.Key)Identity"] = $identityNames["$($e.Key)Identity"] }
     if ($e.Group -and $e.Group -ne $MainGroup -and $shareable -contains $e.Kind) { $groups[$e.Key] = $e.Group }
     if ($e.Extra.flexPlan) { [void]$extraNames.Add([ordered]@{ of = $e.Key; connection = 'host'; name = $e.Extra.flexPlan }) }
+    if ($e.Extra.signIn -and $e.Extra.signInIds) { $signInIds[$e.Key] = $e.Extra.signInIds }
 }
 $location = ''
 $rgInfo = Get-AzJson @('group', 'show', '-n', $MainGroup)
@@ -654,15 +895,18 @@ if (-not $projectName) { $projectName = $MainGroup }
 $project = [ordered]@{ name = $projectName; description = "$projectName on Azure (imported from $($ResourceGroup -join ', '))" }
 if ($prefix -cmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { $project.prefix = $prefix }
 if ($location) { $project.region = $location }
-$environment = [ordered]@{
+# Not $environment: that is the -Environment parameter (a string, case-insensitive name).
+$envAnswers = [ordered]@{
     imported = "$(Get-Date -Format 'yyyy-MM-dd') from $($ResourceGroup -join ', ') ($($account.name)): every question is asked once, with these as the defaults"
     subscriptionId = [string]$account.id
     location = $location
 }
-if ($staticLocation) { $environment.staticLocation = $staticLocation }
-if ($prefix) { $environment.prefix = $prefix }
-$environment.names = $names
-$environment.groups = $groups
+if ($staticLocation) { $envAnswers.staticLocation = $staticLocation }
+if ($prefix) { $envAnswers.prefix = $prefix }
+$envAnswers.names = $names
+$envAnswers.groups = $groups
+# The sign-in's app registrations by id: a connected app keeps its own (the setup never takes one by its name).
+if ($signInIds.Count) { $envAnswers.signInIds = $signInIds }
 
 $result = [ordered]@{
     '$comment' = "Suggested by infra/import.ps1 from $($ResourceGroup -join ', ') in $($account.name). A spec for .\infra\azure-setup.ps1 -Init -SpecFile (infra/LAZYBICEP.md, 'A new project'); 'evidence', 'azureName', 'notes', 'missing' and 'environment' are only for reading (the setup writes the environment's answers from them)."
@@ -672,7 +916,7 @@ $result = [ordered]@{
     missing = @($missingTypes)
     prompts = $(if ($sections.Count) { $promptFile } else { '' })
     environmentName = $Environment
-    environment = $environment
+    environment = $envAnswers
     extraNames = @($extraNames)
     scanned = [ordered]@{ subscription = [string]$account.name; groups = @($ResourceGroup); resources = $items.Count; picked = $picked.Count }
 }

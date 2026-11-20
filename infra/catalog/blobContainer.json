@@ -25,7 +25,7 @@
     "cost": { "kind": "table", "order": 31, "label": "Blob container {name}", "prices": {}, "otherwise": null, "text": "the storage account's blobs" }
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps use <title>?",
     "roles": { "question": "What may <app> do on <title>?", "options": ["Storage Blob Data Reader", "Storage Blob Data Contributor", "Storage Blob Data Owner"], "default": ["Storage Blob Data Reader"] },
     "connection": { "kind": "role", "what": "reads (or writes) its blobs", "via": "its managed identity" },
