@@ -15,9 +15,18 @@ resource {{key}} 'Microsoft.Web/sites@2024-04-01' = {
   location: location
   kind: 'functionapp,linux'
   tags: tags
+//#if identity
+  // Signs in to Azure as its own user-assigned identity only: its host's storage, triggers, Key Vault references.
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${{{identity}}.id}': {} } }
+//#end
+//#if systemIdentity
   identity: { type: 'SystemAssigned' }
+//#end
   properties: {
     serverFarmId: {{hostId}}
+//#if identity
+    keyVaultReferenceIdentity: {{identity}}.id
+//#end
     httpsOnly: true
 //#if flex
     functionAppConfig: {
@@ -25,7 +34,7 @@ resource {{key}} 'Microsoft.Web/sites@2024-04-01' = {
         storage: {
           type: 'blobContainer'
           value: '${{{storage}}.properties.primaryEndpoints.blob}{{container}}'
-          authentication: { type: 'SystemAssignedIdentity' }
+          authentication: {{deploymentAuthentication}}
         }
       }
       scaleAndConcurrency: { maximumInstanceCount: 40, instanceMemoryMB: 2048 }
@@ -47,9 +56,7 @@ resource {{key}} 'Microsoft.Web/sites@2024-04-01' = {
     }
 //#end
   }
-//#if flex
-  dependsOn: [{{key}}Packages]
-//#end
+{{dependsOn}}
 }
 
 // Deployments come from GitHub Actions with OIDC, so no FTP or basic-auth publishing.

@@ -22,6 +22,11 @@ Netmedia  |  https://netmedia.agency  |  netmedia@netmedia.hr
 Reads, without running anything:
   .NET projects (.csproj)   Web -> App Service, Functions -> Function App, Blazor WebAssembly -> Static
                             Web App; tests, libraries, workers and consoles are noted, not deployed
+  Dockerfile / Containerfile  beside a .NET web project, or a Node or Python server: a Container App
+                            (Azure Container Apps) instead of an App Service, with its Dockerfile, build
+                            context (the repository root when the Dockerfile copies paths outside the
+                            folder) and port (EXPOSE, default 8080); one Container Apps environment and
+                            one container registry are suggested for all of them
   package.json              React, Angular, Vue, Svelte, Next, Nuxt, Astro... -> Static Web App (with the
                             folder its build writes); Express, Nest, Fastify... -> App Service (Node);
                             @azure/functions -> Function App
@@ -488,6 +493,73 @@ foreach ($f in @($all | Where-Object { @('requirements.txt', 'pyproject.toml') -
     [void]$projects.Add($p)
 }
 
+# Containers: a web project (.NET), Node or Python server with a Dockerfile (or Containerfile) in its own
+# folder is a container app (Azure Container Apps) instead of an App Service. The Dockerfile says its port
+# (EXPOSE, default 8080) and whether its build context must be the repository root (it copies paths outside
+# its folder: COPY ../x, a solution-level file, a path that exists from the root only; or the project
+# references projects outside its folder).
+function Read-Dockerfile([string]$File, [string]$Dir, $P) {
+    $info = [pscustomobject]@{ Port = ''; Context = $P.Rel; Why = '' }
+    $text = ''
+    try { $text = [IO.File]::ReadAllText($File) } catch { return $info }
+    $text = [regex]::Replace($text, '\\[ \t]*\r?\n', ' ')
+    $rootFiles = '(?i)\.(sln|slnx)$|^(Directory\.(Build|Packages)\.(props|targets)|nuget\.config|global\.json|\.editorconfig|BannedSymbols\.txt)$'
+    $fallback = ''
+    foreach ($line in ($text -split '\r?\n')) {
+        $l = $line.Trim()
+        if ($l -match '^(?i)EXPOSE\s+(\d+)') { $info.Port = $Matches[1]; continue }
+        if (-not $info.Port -and -not $fallback -and $l -match '^(?i)ENV\s+.*\b(ASPNETCORE_HTTP_PORTS|PORT)\s*[= ]\s*"?(\d+)') { $fallback = $Matches[2]; continue }
+        if ($l -notmatch '^(?i)(COPY|ADD)\s+(.+)$') { continue }
+        $rest = $Matches[2]
+        if ($rest -match '(?i)--from=') { continue }
+        $tokens = @($rest -split '\s+' | Where-Object { $_ -and $_ -notmatch '^--' } | ForEach-Object { $_.Trim('[', ']', '"', ',', "'") } | Where-Object { $_ })
+        if ($tokens.Count -lt 2) { continue }
+        foreach ($src in @($tokens | Select-Object -First ($tokens.Count - 1))) {
+            if ($info.Why -or $src -match '[$]|^https?://|^<<') { continue }
+            $s = $src.Replace('\', '/')
+            $here = $false
+            $there = $false
+            try { $here = Test-Path (Join-Path $Dir $s) } catch { }
+            try { $there = Test-Path (Join-Path $Path $s) } catch { }
+            if ($s -eq '..' -or $s -match '(^|/)\.\./') { $info.Why = "COPY $src leaves its folder" }
+            elseif ($s -match $rootFiles -and -not $here) { $info.Why = "COPY $src is a file of the solution's root" }
+            elseif ($s -ne '.' -and $s -ne './' -and -not $here -and $there) { $info.Why = "COPY $src exists from the root only" }
+        }
+    }
+    if (-not $info.Port) { $info.Port = $fallback }
+    if (-not $info.Why -and $P.Lang -eq 'dotnet') {
+        $out = @($P.Refs | Where-Object { -not ([string]$_).StartsWith($P.Dir + '\', [StringComparison]::OrdinalIgnoreCase) })
+        if ($out.Count) { $info.Why = 'the project references projects outside its folder' }
+    }
+    if ($info.Why) { $info.Context = '.' }
+    return $info
+}
+foreach ($p in @($projects | Where-Object { $_.Kind -eq 'appService' })) {
+    $df = @(@('Dockerfile', 'Containerfile') | ForEach-Object { $n = $_; @($all | Where-Object { (Split-Path $_ -Parent) -ieq $p.Dir -and (Split-Path $_ -Leaf) -ieq $n }) } | Where-Object { $_ }) | Select-Object -First 1
+    if (-not $df) { continue }
+    $di = Read-Dockerfile $df $p.Dir $p
+    $port = $di.Port
+    $portNote = "port $port from the Dockerfile"
+    if (-not $port) { $port = '8080'; $portNote = 'no EXPOSE in the Dockerfile: port 8080 (the default)' }
+    $p.Kind = 'containerApp'
+    $p | Add-Member -NotePropertyName Dockerfile -NotePropertyValue (Get-Rel $df) -Force
+    $p | Add-Member -NotePropertyName Context -NotePropertyValue $di.Context -Force
+    $p | Add-Member -NotePropertyName Port -NotePropertyValue $port -Force
+    $contextNote = "build context $($di.Context)"
+    if ($di.Why) { $contextNote += " ($($di.Why))" }
+    [void]$p.Notes.Add("Dockerfile $(Get-Rel $df): a container app (Azure Container Apps) instead of an App Service; $portNote; $contextNote; the first start runs a placeholder image until the app's workflow pushes this one")
+}
+# A Dockerfile beside something that isn't a container app here, or in no project's folder.
+$ownedDirs = @($projects | Where-Object { $_.Kind -eq 'containerApp' } | ForEach-Object { $_.Dir })
+foreach ($f in @($all | Where-Object { (Split-Path $_ -Leaf) -match '^(?i)(Dockerfile|Containerfile)$' })) {
+    $dir = Split-Path $f -Parent
+    if ($ownedDirs -contains $dir) { continue }
+    $other = @($projects | Where-Object { $_.Dir -ieq $dir -and $_.Kind }) | Select-Object -First 1
+    if ($other) { Add-Unique $notes "$(Get-Rel $f): a Dockerfile beside $($other.Name) ($($other.Kind)): the catalog hosts that kind without a container, so it is not used" }
+    else { Add-Unique $notes "$(Get-Rel $f): a Dockerfile in no app project's folder: put it beside the web project, Node or Python server it builds (then a container app is suggested), or add the container app by hand" }
+}
+$appKinds = @('appService', 'functionApp', 'containerApp')
+
 # Settings: appsettings*.json and local.settings.json of a .NET project, .env of the others.
 foreach ($p in $projects) {
     $own = @($all | Where-Object { (Split-Path $_ -Parent) -ieq $p.Dir })
@@ -553,7 +625,7 @@ function Get-Closure($P) {
 $apps = @($projects | Where-Object { $_.Kind })
 # A Blazor WebAssembly app referenced by a web project is served by it (the hosted template).
 foreach ($w in @($apps | Where-Object { $_.Type -eq 'wasm' })) {
-    $host_ = @($apps | Where-Object { $_.Kind -eq 'appService' -and $_.Lang -eq 'dotnet' -and @($_.Refs | Where-Object { $_ -ieq $w.File }).Count }) | Select-Object -First 1
+    $host_ = @($apps | Where-Object { @('appService', 'containerApp') -contains $_.Kind -and $_.Lang -eq 'dotnet' -and @($_.Refs | Where-Object { $_ -ieq $w.File }).Count }) | Select-Object -First 1
     if ($host_) { Add-Unique $notes "$($w.Rel): Blazor WebAssembly served by $($host_.Name) (not a resource of its own)"; $w.Kind = $null }
 }
 $apps = @($apps | Where-Object { $_.Kind })
@@ -605,7 +677,7 @@ if ($dotted.Count) {
         $common++
     }
 }
-foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'staticWebApp').IndexOf($_.Kind) } }, Name)) {
+foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'containerApp', 'staticWebApp').IndexOf($_.Kind) } }, Name)) {
     $base = $a.Name
     if ($a.Lang -eq 'dotnet') { $base = (@($a.Name.Split('.') | Select-Object -Skip $common)) -join '.' }
     $a.Key = Get-FreeKey (Get-KeyName $base)
@@ -712,11 +784,11 @@ function Get-AppConfig($A) {
     foreach ($x in $c.secrets) { Add-Signal $A 'keyVault' "$($x.why) (a secret: kept in Key Vault)" }
     return $c
 }
-foreach ($a in @($apps | Where-Object { @('appService', 'functionApp') -contains $_.Kind })) { $a.Config = Get-AppConfig $a }
+foreach ($a in @($apps | Where-Object { $appKinds -contains $_.Kind })) { $a.Config = Get-AppConfig $a }
 
 # --- the resources they use --------------------------------------------------------------------------
 
-function Get-Users([string]$Signal) { return @($apps | Where-Object { $_.Signals.ContainsKey($Signal) -and @('appService', 'functionApp') -contains $_.Kind }) }
+function Get-Users([string]$Signal) { return @($apps | Where-Object { $_.Signals.ContainsKey($Signal) -and $appKinds -contains $_.Kind }) }
 function Get-Evidence($Users, [string]$Signal) {
     $e = New-Object Collections.ArrayList
     foreach ($u in $Users) { foreach ($x in @($u.Signals[$Signal] | Select-Object -First 3)) { Add-Unique $e $x } }
@@ -843,10 +915,19 @@ if ($vaultUsers.Count) { Add-Resource 'keyVault' (Get-FreeKey 'vault') 'Key Vaul
 $aiUsers = @($apps | Where-Object { $_.Signals.ContainsKey('appInsights') })
 $ev = Get-Evidence $aiUsers 'appInsights'
 if (-not $aiUsers.Count) {
-    $aiUsers = @($apps | Where-Object { @('appService', 'functionApp') -contains $_.Kind })
+    $aiUsers = @($apps | Where-Object { $appKinds -contains $_.Kind })
     if ($aiUsers.Count) { [void]$ev.Add('no telemetry found in the code: recommended for every app (logs, failures, performance)') }
 }
 if ($aiUsers.Count) { Add-Resource 'appInsights' (Get-FreeKey 'insights') 'Application Insights' $null $aiUsers $ev }
+
+# Container apps: one new Container Apps environment and one container registry for all of them (the setup
+# asks for each container app which ones it uses; an existing one can be picked there instead).
+$containerApps = @($apps | Where-Object { $_.Kind -eq 'containerApp' })
+if ($containerApps.Count) {
+    $appTitles = (@($containerApps | ForEach-Object { $_.Title }) -join ', ')
+    Add-Resource 'containerRegistry' (Get-FreeKey 'registry') 'Container registry' $null $null @("for the container app(s) ${appTitles}: their images are built into it by the workflows; the apps pull with their identities (AcrPull), admin user off")
+    Add-Resource 'containerAppsEnvironment' (Get-FreeKey 'contEnv') 'Container Apps environment' $null $null @("for the container app(s) ${appTitles}: a workload-profiles environment (Consumption), logging to a Log Analytics workspace of the map (existing or new: asked)")
+}
 
 # What the catalog has no kind for.
 foreach ($s in @($signalNames.Keys | Where-Object { $catalogSignals -notcontains $_ } | Sort-Object)) {
@@ -855,9 +936,17 @@ foreach ($s in @($signalNames.Keys | Where-Object { $catalogSignals -notcontains
 }
 
 # The apps, after what they use (a new app is asked what of the map it uses).
-foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'staticWebApp').IndexOf($_.Kind) } }, Name)) {
+foreach ($a in @($apps | Sort-Object @{ e = { @('appService', 'functionApp', 'containerApp', 'staticWebApp').IndexOf($_.Kind) } }, Name)) {
     $answers = [ordered]@{}
     switch ($a.Kind) {
+        'containerApp' {
+            $answers.source = $a.Rel
+            $answers.dockerfile = $a.Dockerfile
+            $answers.context = $a.Context
+            $answers.port = $a.Port
+            if ($a.Health) { $answers.health = $a.Health }
+            else { $answers.health = '-'; [void]$a.Notes.Add('no health check found (MapHealthChecks): none, so the app has no probes') }
+        }
         'appService' {
             if ($a.Runtime) { $answers.runtime = $a.Runtime }
             $answers.source = $a.Rel
@@ -920,7 +1009,7 @@ elseif ($parts.Count) {
     if ($slug.Length -gt 12) { $slug = $slug.Substring(0, 12) }
     $prefix = "$first-$slug"
 }
-$kindsUsed = @($resources | Where-Object { @('appService', 'functionApp', 'staticWebApp') -notcontains $_.kind } | ForEach-Object { $_.kind } | Select-Object -Unique)
+$kindsUsed = @($resources | Where-Object { @('appService', 'functionApp', 'containerApp', 'staticWebApp') -notcontains $_.kind } | ForEach-Object { $_.kind } | Select-Object -Unique)
 $description = "$projectName on Azure"
 if ($apps.Count) { $description += ': ' + ((@($apps | ForEach-Object { $_.Key })) -join ', ') }
 if ($kindsUsed.Count) { $description += ' with ' + ($kindsUsed -join ', ') }
@@ -955,15 +1044,15 @@ if (-not $resources.Count) { Write-Host '    none found: start the map by hand (
 foreach ($r in $resources) {
     $extra = ''
     if ($r.answers) { $extra = (@($r.answers.Keys | ForEach-Object { "$_=$($r.answers[$_])" })) -join '  ' }
-    Write-Host ("    {0,-13} {1,-14} {2}" -f $r.kind, $r.key, $r.title) -ForegroundColor Green
-    if ($extra) { Write-Host "                  $extra" -ForegroundColor DarkGray }
-    if ($r.uses) { Write-Host "                  uses $($r.uses -join ', ')" -ForegroundColor DarkGray }
-    foreach ($e in $r.evidence) { Write-Host "                  - $e" -ForegroundColor DarkGray }
+    Write-Host ("    {0,-24} {1,-14} {2}" -f $r.kind, $r.key, $r.title) -ForegroundColor Green
+    if ($extra) { Write-Host "                             $extra" -ForegroundColor DarkGray }
+    if ($r.uses) { Write-Host "                             uses $($r.uses -join ', ')" -ForegroundColor DarkGray }
+    foreach ($e in $r.evidence) { Write-Host "                             - $e" -ForegroundColor DarkGray }
     if ($r.config) {
-        foreach ($x in @($r.config.settings | Where-Object { $_ })) { Write-Host "                  setting  $($x.name) = $($x.value)" -ForegroundColor Cyan }
-        foreach ($x in @($r.config.secrets | Where-Object { $_ })) { Write-Host "                  secret   $($x.setting) <- Key Vault $($x.name) (you put the value in)" -ForegroundColor Cyan }
-        foreach ($x in @($r.config.values | Where-Object { $_ })) { Write-Host "                  value    $($x.setting) <- asked per environment ($($x.answer))" -ForegroundColor Cyan }
-        foreach ($x in @($r.config.warnings | Where-Object { $_ })) { Write-Host "                  ! $x" -ForegroundColor Yellow }
+        foreach ($x in @($r.config.settings | Where-Object { $_ })) { Write-Host "                             setting  $($x.name) = $($x.value)" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.secrets | Where-Object { $_ })) { Write-Host "                             secret   $($x.setting) <- Key Vault $($x.name) (you put the value in)" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.values | Where-Object { $_ })) { Write-Host "                             value    $($x.setting) <- asked per environment ($($x.answer))" -ForegroundColor Cyan }
+        foreach ($x in @($r.config.warnings | Where-Object { $_ })) { Write-Host "                             ! $x" -ForegroundColor Yellow }
     }
 }
 if ($notes.Count) {

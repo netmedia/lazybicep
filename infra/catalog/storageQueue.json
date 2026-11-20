@@ -21,7 +21,7 @@
     "cost": { "kind": "table", "order": 31, "label": "Storage queue {name}", "prices": {}, "otherwise": null, "text": "< 0.10" }
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps use <title>?",
     "roles": { "question": "What may <app> do on <title>?", "options": ["Storage Queue Data Contributor", "Storage Queue Data Message Sender", "Storage Queue Data Message Processor"], "default": ["Storage Queue Data Contributor"] },
     "connection": { "kind": "role", "what": "sends and reads messages", "via": "its managed identity" },

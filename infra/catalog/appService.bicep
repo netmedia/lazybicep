@@ -6,9 +6,18 @@ resource {{key}} 'Microsoft.Web/sites@2024-04-01' = {
   location: location
   kind: 'app,linux'
   tags: tags
+//#if identity
+  // Signs in to Azure as its own user-assigned identity only; Key Vault references too.
+  identity: { type: 'UserAssigned', userAssignedIdentities: { '${{{identity}}.id}': {} } }
+//#end
+//#if systemIdentity
   identity: { type: 'SystemAssigned' }
+//#end
   properties: {
     serverFarmId: {{hostId}}
+//#if identity
+    keyVaultReferenceIdentity: {{identity}}.id
+//#end
     httpsOnly: true
     siteConfig: {
       linuxFxVersion: '{{runtime}}'
@@ -22,6 +31,7 @@ resource {{key}} 'Microsoft.Web/sites@2024-04-01' = {
       appSettings: {{settingsArray}}
     }
   }
+{{dependsOn}}
 }
 
 // Deployments come from GitHub Actions with OIDC (infra/README.md), so no FTP or basic-auth publishing.

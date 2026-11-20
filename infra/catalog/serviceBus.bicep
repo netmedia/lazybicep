@@ -5,7 +5,7 @@ param {{name}} string
 @allowed({{sizeOptions}})
 param {{size}} string = '{{sizeDefault}}'
 
-resource {{key}} 'Microsoft.ServiceBus/namespaces@2021-11-01' = {
+resource {{key}} 'Microsoft.ServiceBus/namespaces@2024-01-01' = {
   name: {{name}}
   location: location
   tags: tags

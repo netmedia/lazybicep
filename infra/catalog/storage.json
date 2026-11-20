@@ -20,7 +20,7 @@
     "cost": { "kind": "pennies", "order": 3, "label": "Storage account {name}" }
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps use <title>?",
     "roles": { "question": "What may <app> do on <title>?", "options": ["Storage Blob Data Contributor", "Storage Queue Data Contributor", "Storage Table Data Contributor"], "default": ["Storage Blob Data Contributor"] },
     "connection": { "kind": "role", "what": "reads and writes data", "via": "its managed identity" },
