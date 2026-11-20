@@ -31,6 +31,12 @@ var {{key}}Secrets = {{secretsArray}}
 
 var {{key}}SecretSettings = {{secretSettingsArray}}
 //#end
+//#if signInSettings
+
+// Settings with its sign-in client id: empty until the sign-in exists, so only with its own image (which never runs
+// before it).
+var {{key}}SignInSettings = {{signInSettingsArray}}
+//#end
 //#if health
 
 // Container Apps' probe limits: initialDelaySeconds 0-60, periodSeconds and timeoutSeconds 1-240, failureThreshold
@@ -132,6 +138,9 @@ resource {{key}}SignIn 'Microsoft.App/containerApps/authConfigs@2025-07-01' = if
           openIdIssuer: '${environment().authentication.loginEndpoint}${tenant().tenantId}/v2.0'
         }
         validation: {
+          // The client id only, never the identifier URI. This narrows, it does not close: an app-only token whose
+          // audience is the client id itself still passes, so an app that treats the caller as a user must refuse
+          // app-only principals itself (LAZYBICEP.md, signIn).
           allowedAudiences: {{audiences}}
         }
       }

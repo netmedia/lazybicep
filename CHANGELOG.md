@@ -4,6 +4,57 @@ What changed in LazyBicep, newest first. The kit's version is in `infra/kit.json
 with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet run against Azure:
 [docs/TODO.md](docs/TODO.md).
 
+## 0.2.1 (on `develop`; not tagged yet)
+
+- **A container app's own address**: `{<key>.host}` of a `containerApp` is made from its name and its
+  environment's default domain (`<name>.<domain>`; internal ingress `<name>.internal.<domain>`), not from its
+  `ingress.fqdn`, so the app may use it in its own settings without a cycle (`Mcp__PublicBaseUrl =
+  https://{gateway.host}`). The output `<key>HostName` is unchanged; the setup reads the same value from Azure.
+- **`{<key>.signInClientId}`**: a container app's sign-in client id (`<key>SignInClientId`), only for an app with
+  `signIn`. Empty until the step Sign-in app registrations; the app runs the placeholder until then, so its own
+  image never sees it empty (the setup's settings check expects it empty too). A container app's setting that
+  uses it is set with its own image only (`<key>SignInSettings`, like the Key Vault secret settings), so the
+  placeholder revision never gets an empty value.
+- **`{envName}` of `development` is `Dev`** (AZ 12.5): the apps' `ASPNETCORE_ENVIRONMENT` /
+  `AZURE_FUNCTIONS_ENVIRONMENT` in `dev` was `Development`, which made `IsDevelopment()` true in Azure. Every other
+  environment keeps its full name capitalized (`Production`, `Test`...); the GitHub environment keeps the full
+  name `development` (AZ 12.2). A `dev` app now loads `appsettings.Dev.json`.
+- **`{tenantId}`** (`tenant().tenantId`) and **`{loginEndpoint}`** (`environment().authentication.loginEndpoint`,
+  `https://login.microsoftonline.com/`); the setup fills them from the chosen subscription's tenant and
+  `az cloud show`.
+- **Project tags**: `project.tags` of the map (name -> value, AZ 2 `client`, `owner`...) on every resource after
+  the kit's `project`, `environment` and `managed-by`, which they can't replace (refused, also by `-Init`).
+  Asked in a new project ("Extra tags for every resource", `name=value, ...`; a spec file's `project.tags`); put
+  on a resource group the setup creates; `-Check` reports an existing group without one (the what-if covers the
+  template's resources). A name has 1-128 characters without `# : < > \ / ? & % " !` or control characters, a
+  value up to 256 without `" % !`, control characters or a final `\` (the same check in `-Init` and
+  `generate.ps1`); at most 47 (50 on a resource with the kit's 3). Names `true`, `false`, `null` are quoted in
+  Bicep. Maps without `project.tags` make the same tags line as 0.2.0.
+- `examples/spec.containerapp.json` uses all of them.
+- **Health checks of the deploy workflows end after 5 minutes**: the container app's and the App Service's
+  health step looped 30 times (`az` + `curl --max-time 20` + `sleep 10`), up to about 15 minutes. Now a deadline
+  at start + 300 s (curl's `--max-time` and the sleep capped by the time left, `az containerapp show` under
+  `timeout`) and `timeout-minutes: 6` on the step. Green still means the health path answered.
+- **First image waits for the secrets put in by hand**: besides the Key Vault secrets the app's settings
+  reference, the step (before the build and again before the deploy) checks every `by: hand` secret the map gives
+  the app (a vault's `secrets[]` with `app` = the app, or without `app` in a vault whose `handSecrets` restart it),
+  by name only; a missing one stops it before any deployment, and the next steps say how to put it in.
+- **Sign-in accepts the client id only (security, CWE-863)**: with `signIn.identifierUri: true` the container
+  app's `allowedAudiences` also held `api://<client id>`, so an app-only token issued for that URI (a daemon's
+  client credentials, another API sharing the registration) passed on the signed-in routes as if a user had signed
+  in. `identifierUri` now changes only the app registration (the setup's step); the sign-in is for users, and an API
+  for applications lives on an excluded path and validates its own tokens. A map with `identifierUri` gets a
+  shorter `allowedAudiences` in `main.bicep` (the what-if shows the change).
+- **Allowed regions**: `project.regions` of the map (a list, e.g. EU only, AZ 2) puts `@allowed([...])` on
+  `main.bicep`'s `location` (and limits `staticLocation` to those of them), so a deployment elsewhere fails; the
+  setup offers only those regions for a new resource group (a choice) and stops on an existing group in another
+  region. Asked by `-Init` ("Regions the resources may be in", `-` = any; a spec file's `project.regions`), then the
+  default region is one of them. `regions.default` must be in the list. Maps without it: unchanged.
+- **Actions pinned by commit SHA** (supply chain): every action in `catalog/workflows/actions.json` is
+  `<owner>/<repo>@<40-character sha> # <release>`; the release stays readable as a YAML comment on the `uses:`
+  line (Dependabot updates both). The SHAs are the current releases of the same major tags (checked
+  2026-11-20); the `$comment` says how to upgrade. Generated workflows change only in their `uses:` lines.
+
 ## 0.2.0 (on `develop`, the default branch; not tagged yet)
 
 Everything since 0.1.0. Why the identity model and the Container Apps kinds are built this way:

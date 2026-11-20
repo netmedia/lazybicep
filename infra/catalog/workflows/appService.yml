@@ -121,21 +121,25 @@ jobs:
           package: publish
 //#if health
       # The app answers its health check ({{healthPath}}) after the deploy, or the run fails: a green
-      # deploy of an app that doesn't start helps nobody.
+      # deploy of an app that doesn't start helps nobody. A hard 5-minute deadline: each call gets only the time
+      # left, and the step's timeout ends anything that still hangs.
       - name: Health check
         if: steps.env.outputs.ready
+        timeout-minutes: 6
         run: |
+          deadline=$(( $(date +%s) + 300 )); code=
           host=$(az webapp list --query "[?name=='${{ vars.{{appVar}} }}'].defaultHostName | [0]" -o tsv)
           url="https://$host{{healthPath}}"
-          for attempt in $(seq 1 30); do
-            code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$url" || true)
+          while left=$(( deadline - $(date +%s) )); [ "$left" -gt 0 ]; do
+            code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$(( left < 20 ? left : 20 ))" "$url" || true)
             case "$code" in
               2??) echo "$url: $code"; exit 0 ;;
               # Up but not open to the runner (Easy Auth, locked to Front Door): it answers, that's enough here.
               401|403|302|307) echo "::warning::$url answered $code: the app is up, but the runner can't see its health check"; exit 0 ;;
             esac
-            sleep 10
+            left=$(( deadline - $(date +%s) ))
+            if [ "$left" -gt 0 ]; then sleep "$(( left < 10 ? left : 10 ))"; fi
           done
-          echo "::error::$url answered $code after 5 minutes"; exit 1
+          echo "::error::$url answered ${code:-nothing} after 5 minutes"; exit 1
 //#end
 {{afterDeploy}}

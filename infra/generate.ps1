@@ -26,9 +26,12 @@ then run this, and a dry run shows what would change in Azure.
 
 Values in {braces}: {<key>.name} (its name parameter), {<key>.host}, {<key>.id}, {<key>.connectionString}
 (Application Insights), {<key>.tableEndpoint} / queueEndpoint / blobEndpoint (storage), {<key>.clientId} /
-principalId (an app's identity), {<answer>} (a custom domain's parameter, e.g. {webDomain}),
-{secret.<name>} (a secret the setup keeps), {kvdns} (.vault.azure.net), {env}; 'a|b' takes b when a is
-empty (an unset domain, a resource that isn't used).
+principalId (an app's identity), {<key>.signInClientId} (a container app's sign-in registration; empty
+until the setup's sign-in step), {<answer>} (a custom domain's parameter, e.g. {webDomain}),
+{secret.<name>} (a secret the setup keeps), {kvdns} (.vault.azure.net), {env}, {tenantId}, {loginEndpoint}
+(https://login.microsoftonline.com/); 'a|b' takes b when a is empty (an unset domain, a resource that isn't
+used). A container app's {<key>.host} comes from its name and its environment's domain, so it may be used in
+its own settings. The map's project.tags (name -> value) go on every resource next to the kit's own tags.
 
 Every app signs in as its own user-assigned identity (an appIdentity of the map: the app's "identity", its
 "owner"): its roles, Key Vault reads, AZURE_CLIENT_ID and identity-based connection settings use it.
@@ -142,7 +145,11 @@ function Get-TokenBicep([string]$Token) {
     if ($Token -eq 'kvdns') { return 'environment().suffixes.keyvaultDns' }
     if ($Token -eq 'env') { return 'environmentName' }
     # The environment's name capitalized (Production): appsettings.Production.json on Linux's case-sensitive disk.
-    if ($Token -eq 'envName') { return "'`${toUpper(substring(environmentName, 0, 1))}`${substring(environmentName, 1)}'" }
+    # Except development -> Dev: Development would make IsDevelopment() true in Azure (AZ 12.5).
+    if ($Token -eq 'envName') { return "environmentName == 'development' ? 'Dev' : '`${toUpper(substring(environmentName, 0, 1))}`${substring(environmentName, 1)}'" }
+    # The tenant main.bicep is deployed to, and its cloud's sign-in address (https://login.microsoftonline.com/).
+    if ($Token -eq 'tenantId') { return 'tenant().tenantId' }
+    if ($Token -eq 'loginEndpoint') { return 'environment().authentication.loginEndpoint' }
     if ($Token.StartsWith('secret.')) {
         $name = $Token.Substring(7)
         foreach ($d in $defs) { foreach ($s in @($d.secrets)) { if ($s -and $s.name -eq $name -and $s.param) { return [string]$s.param } } }
@@ -170,7 +177,14 @@ function Get-TokenBicep([string]$Token) {
                 'sqlServer' { return "'`${$($d.param)}`${environment().suffixes.sqlServerHostname}'" }
                 'serviceBus' { return "'`${$($d.param)}.servicebus.windows.net'" }
                 'appConfiguration' { return "'`${$($d.param)}.azconfig.io'" }
-                'containerApp' { return "$key.properties.configuration.ingress.fqdn" }
+                # From its name and its environment's domain, not its ingress.fqdn: the app may use its own
+                # address in its own settings (no cycle). Internal ingress: <name>.internal.<domain>.
+                'containerApp' {
+                    $environment = Get-ContainerAppPart $d 'environment' 'containerAppsEnvironment' 'host'
+                    $internal = ''
+                    if ([string]$d.ingress -eq 'internal') { $internal = '.internal' }
+                    return "'`${$($d.param)}$internal.`${$($environment.key).properties.defaultDomain}'"
+                }
                 'containerRegistry' { return "$key.properties.loginServer" }
             }
             return "$key.properties.defaultHostName"
@@ -182,6 +196,9 @@ function Get-TokenBicep([string]$Token) {
         # An app's identity: its client id (AZURE_CLIENT_ID, <Name>__clientId, SQL's User Id) and principal.
         'clientId' { if ($d.kind -eq 'appIdentity') { return "$key.properties.clientId" } }
         'principalId' { if ($d.kind -eq 'appIdentity') { return "$key.properties.principalId" } }
+        # A container app's sign-in registration: empty until the setup's sign-in step (the app runs the
+        # placeholder until then, so its own image never sees it empty).
+        'signInClientId' { if ($d.kind -eq 'containerApp' -and (Test-SignIn $d)) { return "${key}SignInClientId" } }
     }
     Fail "{$Token}: $($parts[1]) isn't a value of a resource"
 }
@@ -219,7 +236,8 @@ function Get-ValueBicep([string]$Value) {
 }
 function Get-Literal([string]$Text) { return $Text.Replace('\', '\\').Replace("'", "\'").Replace('${', '\${') }
 function Get-Quoted([string]$Text) { return "'" + (Get-Literal $Text) + "'" }
-function Get-PropName([string]$Name) { if ($Name -match '^[A-Za-z_][A-Za-z0-9_]*$') { return $Name } return (Get-Quoted $Name) }
+# A property name as it is when Bicep reads it as one (true, false and null are keywords there: quoted).
+function Get-PropName([string]$Name) { if ($Name -match '^[A-Za-z_][A-Za-z0-9_]*$' -and @('true', 'false', 'null') -notcontains $Name) { return $Name } return (Get-Quoted $Name) }
 
 function Get-SettingsArray($Def, [string]$Indent) {
     $lines = @('[')
@@ -508,12 +526,18 @@ function Get-Section($Def) {
             $v.healthPath = Get-Quoted $health
             # Settings: values as they are; Key Vault secrets by reference (secretRef), in their own list - only the
             # app's own image gets them (the hand secrets go into a new vault after the first start).
+            # A setting with a sign-in client id ({<key>.signInClientId}) is real-image-only too: it is empty until the
+            # sign-in step, and the placeholder never gets it.
             $envLines = @('[')
             $secretEnvLines = @('[')
+            $signInEnvLines = @('[')
             $secretRefs = [ordered]@{}
             foreach ($s in @(Get-Settings $Def)) {
                 $ref = Get-ContainerSecret $Def $s
-                if ($ref) {
+                if (-not $ref -and [string]$s.value -match '\{[^{}]*\.signInClientId[|}]') {
+                    if ($s.about) { $signInEnvLines += "  // $($s.about)" }
+                    $signInEnvLines += "  { name: $(Get-Quoted $s.name), value: $(Get-ValueBicep $s.value) }"
+                } elseif ($ref) {
                     if ($secretRefs.Contains($ref.name) -and $secretRefs[$ref.name].url -ne $ref.url) { Fail "${key}: two Key Vault secrets are both $($ref.name) in lowercase (a Container Apps secret's name)" }
                     $secretRefs[$ref.name] = $ref
                     if ($s.about) { $secretEnvLines += "  // $($s.about)" }
@@ -528,11 +552,19 @@ function Get-Section($Def) {
             $v.secretsArray = ''
             $v.secretSettingsArray = ''
             $v.envExpr = "$($key)Settings"
+            $realOnly = @()
             if ($f.secrets) {
                 $v.secretsArray = "[`n" + ((@($secretRefs.Values | ForEach-Object { "  { name: $(Get-Quoted $_.name), keyVaultUrl: $($_.url), identity: $($Def.identity).id }" })) -join "`n") + "`n]"
                 $v.secretSettingsArray = ($secretEnvLines + ']') -join "`n"
-                $v.envExpr = "$($key)Real ? concat($($key)Settings, $($key)SecretSettings) : $($key)Settings"
+                $realOnly += "$($key)SecretSettings"
             }
+            $f.signInSettings = $signInEnvLines.Count -gt 1
+            $v.signInSettingsArray = ''
+            if ($f.signInSettings) {
+                $v.signInSettingsArray = ($signInEnvLines + ']') -join "`n"
+                $realOnly += "$($key)SignInSettings"
+            }
+            if ($realOnly.Count) { $v.envExpr = "$($key)Real ? concat($($key)Settings, $($realOnly -join ', ')) : $($key)Settings" }
             # Its own image only when it has one (not the placeholder) and, with sign-in, once the sign-in exists.
             $f.signIn = Test-SignIn $Def
             $v.realExpr = "!empty($($v.image)) && $($v.image) != $($key)Placeholder"
@@ -552,9 +584,9 @@ function Get-Section($Def) {
                 $v.excludedPaths = '[' + ((@($unique | ForEach-Object { Get-Quoted $_ })) -join ', ') + ']'
                 $v.excludedNote = 'none'
                 if ($unique.Count) { $v.excludedNote = $unique -join ', ' }
-                $audiences = @($v.signInClientId)
-                if (@('true', 'yes') -contains [string]$Def.signIn.identifierUri) { $audiences += "'api://`${$($v.signInClientId)}'" }
-                $v.audiences = '[' + ($audiences -join ', ') + ']'
+                # The client id only: sign-in is for users. identifierUri changes only the app registration (the
+                # setup); api://<client id> here would let app-only tokens for it pass on the signed-in routes.
+                $v.audiences = "[$($v.signInClientId)]"
             }
             # Its logs from its first revision on; its identity's roles and Key Vault reads before it starts.
             Set-AppIdentity $Def $v $f @("$($environment.key)Logs")
@@ -710,6 +742,53 @@ function Get-RoleAssignments {
     return $list
 }
 
+# The project's own tags (project.tags: name -> value) on every resource, after the kit's project, environment and
+# managed-by, which they never replace (the setup and -Check rely on them); names are case-insensitive.
+# One tag's problem, '' when it is fine - the same rule as azure-setup.ps1's Get-TagProblem (keep them equal): a name
+# of 1-128 characters without # : < > \ / ? & % " ! or a control character (Azure's limits, and what the setup
+# can pass to the Azure CLI); a value of up to 256 characters without " % ! or a control character, not ending in \.
+function Get-TagProblem([string]$Name, [string]$Value) {
+    if (@('project', 'environment', 'managed-by') -contains $Name.ToLowerInvariant()) { return "${Name}: the kit's own tag (project, environment, managed-by)" }
+    if (-not $Name -or $Name.Length -gt 128 -or $Name -match '[#:<>\\/?&%"!\x00-\x1f\x7f]') { return "'$Name': a name of 1-128 characters, none of # : < > \ / ? & % "" ! or a control character" }
+    if ($Value.Length -gt 256 -or $Value -match '["%!\x00-\x1f\x7f]' -or $Value.EndsWith('\')) { return "${Name}: a value of up to 256 characters, none of "" % ! or a control character, not ending in \" }
+    return ''
+}
+# At most 50 tags on a resource: the kit's 3 and up to 47 of the project's.
+$maxExtraTags = 47
+function Get-ExtraTags {
+    $list = @()
+    if (-not $map.project.tags) { return $list }
+    $seen = @()
+    foreach ($p in @($map.project.tags.PSObject.Properties)) {
+        $name = [string]$p.Name
+        $value = [string]$p.Value
+        $problem = Get-TagProblem $name $value
+        if ($problem) { Fail "project.tags: $problem" }
+        if ($seen -contains $name.ToLowerInvariant()) { Fail "project.tags: $name twice (tag names are case-insensitive)" }
+        $seen += $name.ToLowerInvariant()
+        $list += [pscustomobject]@{ Name = $name; Value = $value }
+    }
+    if ($list.Count -gt $maxExtraTags) { Fail "project.tags: $($list.Count) tags, at most $maxExtraTags (50 on a resource, 3 of them the kit's)" }
+    return $list
+}
+
+# The regions the project's resources may be in (project.regions, e.g. EU only - AZ 2); none = any region. main.bicep
+# allows only these for location (and staticLocation), so a deployment elsewhere fails; the setup offers only these.
+# Region names as Azure writes them (westeurope); regions.default must be one of them.
+function Get-AllowedRegions {
+    $list = @()
+    if ($null -eq $map.project.regions) { return , $list }
+    foreach ($r in @($map.project.regions)) {
+        $name = [string]$r
+        if ($name -cnotmatch '^[a-z][a-z0-9]{1,40}$') { Fail "project.regions: '$name' is no region name (lowercase, as Azure writes it: westeurope)" }
+        if ($list -contains $name) { Fail "project.regions: $name twice" }
+        $list += $name
+    }
+    if (-not $list.Count) { Fail 'project.regions: empty (leave it out for any region)' }
+    if ($list -cnotcontains [string]$map.regions.default) { Fail "project.regions: the default region $($map.regions.default) (regions.default) isn't one of $($list -join ', ')" }
+    return , $list
+}
+
 function Get-Bicep {
     foreach ($d in $defs) { if (-not $d.kind) { Fail "$($d.key) has no kind" } }
     # An app identity belongs to the one app that names it (and names it back as its owner).
@@ -727,13 +806,26 @@ function Get-Bicep {
     $out.Add('// shared resource with an empty <x>Group is created and managed here (tagged managed-by), otherwise it is an')
     $out.Add('// existing one of that group, used as it is.')
     $out.Add('')
+    $allowedRegions = Get-AllowedRegions
     $out.Add("@description('Region of every new resource except the Static Web Apps.')")
-    $out.Add('param location string = resourceGroup().location')
+    if ($allowedRegions.Count) {
+        # any(): Bicep can't type-check the group's region against the list (BCP033); ARM checks the value at deploy.
+        $out.Add("@allowed([$((@($allowedRegions) | ForEach-Object { Get-Quoted $_ }) -join ', ')]) // project.regions")
+        $out.Add('param location string = any(resourceGroup().location)')
+    } else { $out.Add('param location string = resourceGroup().location') }
     if (@($defs | Where-Object { $_.kind -eq 'staticWebApp' }).Count) {
+        # Offered in a few regions only; with project.regions only those of them.
+        $static = @($map.regions.staticWebApp)
+        $staticDefault = [string]$map.regions.default
+        if ($allowedRegions.Count) {
+            $static = @($static | Where-Object { $allowedRegions -ccontains [string]$_ })
+            if (-not $static.Count) { Fail "project.regions: none of them offers Static Web Apps ($(@($map.regions.staticWebApp) -join ', '))" }
+            if ($static -cnotcontains $staticDefault) { $staticDefault = [string]$static[0] }
+        }
         $out.Add('')
         $out.Add("@description('Region of the Static Web Apps (offered in a few regions only).')")
-        $out.Add("@allowed([$((@($map.regions.staticWebApp) | ForEach-Object { Get-Quoted $_ }) -join ', ')])")
-        $out.Add("param staticLocation string = $(Get-Quoted $map.regions.default)")
+        $out.Add("@allowed([$(($static | ForEach-Object { Get-Quoted $_ }) -join ', ')])")
+        $out.Add("param staticLocation string = $(Get-Quoted $staticDefault)")
     }
     $out.Add('')
     $out.Add("@description('Environment, full name (production, test, staging, development, acceptance): a tag.')")
@@ -768,7 +860,10 @@ function Get-Bicep {
         }
     }
     $out.Add('')
-    $out.Add("var tags = { project: project, environment: environmentName, 'managed-by': $(Get-Quoted $map.project.managedByTag) }")
+    $extraTags = @(Get-ExtraTags)
+    $tagLine = "var tags = { project: project, environment: environmentName, 'managed-by': $(Get-Quoted $map.project.managedByTag)"
+    foreach ($t in $extraTags) { $tagLine += ", $(Get-PropName $t.Name): $(Get-Quoted $t.Value)" }
+    $out.Add("$tagLine }")
     $out.Add('var here = resourceGroup().name')
 
     foreach ($d in $defs) {
@@ -829,7 +924,8 @@ function Get-EnvBranches {
 function Get-YamlQuoted([string]$Text) { return "'" + $Text.Replace("'", "''") + "'" }
 # A step of the map: { name, id, workingDirectory, run, comment }; $If on every step of a job that skips
 # when the environment isn't set up.
-# An action by its short name in catalog/workflows/actions.json (checkout -> actions/checkout@v7), or as given.
+# An action by its short name in catalog/workflows/actions.json (checkout -> actions/checkout@<sha> # v7.0.1), or as
+# given. It always ends its uses: line, so the release comment stays a YAML comment.
 function Get-Action([string]$Name) {
     if ($actions.$Name) { return [string]$actions.$Name }
     return $Name
