@@ -1,9 +1,16 @@
 {
-  "project": { "name": "Contoso Gateway", "description": "A containerised API on Container Apps with sign-in, next to a function app: Key Vault, a registry, telemetry", "prefix": "contoso-gateway", "region": "westeurope", "deploymentName": "gateway-{env}" },
+  "project": { "name": "Contoso Gateway", "description": "A containerised API on Container Apps with sign-in, next to a function app: Key Vault, a registry, telemetry", "prefix": "contoso-gateway", "region": "westeurope", "deploymentName": "gateway-{env}",
+    "tags": { "client": "contoso", "owner": "ops@contoso.example", "product": "contoso-gateway" } },
   "resources": [
     { "kind": "containerApp", "key": "gateway", "title": "Gateway",
       "answers": { "source": "src/Gateway", "dockerfile": "src/Gateway/Dockerfile", "context": ".", "port": "8080", "cpu": "0.5", "memory": "1Gi", "minReplicas": "0", "maxReplicas": "1", "revisionMode": "single", "ingress": "external", "health": "/health", "sticky": "yes", "signIn": "entra" },
-      "requires": { "containerAppsEnvironment": "new", "containerRegistry": "new" } },
+      "requires": { "containerAppsEnvironment": "new", "containerRegistry": "new" },
+      "config": { "settings": [
+        { "name": "Gateway__PublicBaseUrl", "value": "https://{gateway.host}", "why": "its own address (from its name and environment: no cycle)" },
+        { "name": "AzureAd__Instance", "value": "{loginEndpoint}", "why": "the cloud's sign-in address" },
+        { "name": "AzureAd__TenantId", "value": "{tenantId}", "why": "the tenant it runs in" },
+        { "name": "AzureAd__ClientId", "value": "{gateway.signInClientId}", "why": "its sign-in registration (empty until the sign-in step; its image runs only after it)" }
+      ] } },
     { "kind": "storage", "key": "state", "title": "Function state" },
     { "kind": "functionApp", "key": "jobs", "title": "Jobs", "answers": { "hosting": "flex" }, "requires": { "storage": "state" } },
     { "kind": "keyVault", "key": "vault", "title": "Key Vault", "users": ["gateway", "jobs"] }

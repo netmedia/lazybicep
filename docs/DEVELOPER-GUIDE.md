@@ -187,7 +187,7 @@ It also sorts every setting each App Service and Function App reads (settings fi
 
 | Found | Becomes |
 | --- | --- |
-| A trigger's `Connection = "Sb"`, a connection string with a key | An identity-based setting under the app's own name: `Sb__fullyQualifiedNamespace = {bus.host}` |
+| A trigger's `Connection = "Sb"`, a connection string with a key | An identity-based setting under the app's own name: `Sb__fullyQualifiedNamespace = {bus.host}` (more values: `{tenantId}`, `{loginEndpoint}`; a container app's own `{gateway.host}` and `{gateway.signInClientId}`, the latter empty until its sign-in step - `infra/LAZYBICEP.md`, `appSettings`) |
 | A password, key, token, client secret | A Key Vault secret you put in; the setting is a Key Vault reference |
 | An empty, placeholder or `localhost` value | A value asked per environment (the map's `values`, a `main.bicep` parameter) |
 | Clients without `DefaultAzureCredential` | A warning with the code change |
@@ -216,7 +216,7 @@ Kinds the catalog lacks are listed in `infra/new-kinds.md` (see scenario 14).
 .\infra\azure-setup.ps1 -Init -SpecFile spec.json
 ```
 
-Start from `examples/spec.example.json` in the LazyBicep repo or from `analyze.ps1 -Out`. Per resource: `kind`, `key`, `title`, `answers`, `requires` (`{kind: key}` or `"new"`), `users`, `uses`, `roles`. Anything left out takes the default.
+Start from `examples/spec.example.json` in the LazyBicep repo or from `analyze.ps1 -Out`. Per resource: `kind`, `key`, `title`, `answers`, `requires` (`{kind: key}` or `"new"`), `users`, `uses`, `roles`. Anything left out takes the default. `project.tags` (`{ "client": "...", "owner": "..." }`, asked as "Extra tags for every resource" without a spec) go on every resource next to the kit's own `project`, `environment` and `managed-by`, which they can't replace. `project.regions` (`["westeurope", "northeurope", "swedencentral"]`, asked as "Regions the resources may be in" without a spec; left out = any) puts `@allowed` on `main.bicep`'s `location`, so a deployment elsewhere fails, and the setup offers only those regions.
 
 ```json
 {
@@ -398,7 +398,7 @@ Then `.\infra\generate.ps1` and commit. `"{environments}"` expands to every envi
 
 ### 12. Upgrade GitHub Actions versions everywhere
 
-All generated workflows reference actions by short name from `infra/catalog/workflows/actions.json` (e.g. `"checkout": "actions/checkout@v7"`). Change the version there (kit-wide via a LazyBicep PR, then `-Update`), run `.\infra\generate.ps1`, commit. Every workflow follows.
+All generated workflows reference actions by short name from `infra/catalog/workflows/actions.json` (e.g. `"checkout": "actions/checkout@<commit sha> # v7.0.1"`), pinned by full commit SHA with the release as a YAML comment. Change it there - the new release's commit from `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (annotated tags once more through `git/tags/<sha>`) - kit-wide via a LazyBicep PR, then `-Update`, run `.\infra\generate.ps1`, commit. Every workflow follows.
 
 ### 13. Change naming conventions
 
