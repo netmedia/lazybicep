@@ -183,6 +183,19 @@ Per resource: `kind`, `key`, `title`, `answers` (its blueprint's questions), `re
 where a use offers roles), `namingType` (another naming type of `naming.json`, e.g. `dfunc` for a function app
 with Durable Functions; `analyze.ps1` suggests it). Anything left out takes the blueprint's default.
 
+`project.tags` (asked in a new project: "Extra tags for every resource", `name=value, ...`, `-` for none) are
+the project's own tags, e.g. `{ "client": "netmedia", "owner": "someone@netmedia.hr" }` (AZ 2): `main.bicep`
+puts them on every resource after the kit's `project`, `environment` and `managed-by` (the AZ 2 `managedBy`),
+which they can't replace (refused). The setup tags a resource group it creates with them; `-Check` reports an
+existing group without one, and the what-if shows a resource of the template without them.
+
+`project.regions` (asked in a new project: "Regions the resources may be in", comma separated, `-` for any) limits
+where the resources may go, e.g. `["westeurope", "northeurope", "swedencentral"]` for EU only (AZ 2): `main.bicep`
+gets `@allowed([...])` on `location` (and only those of them on a Static Web App's `staticLocation`), so a
+deployment to another region fails before anything is made; the setup offers only these regions for a new
+resource group and stops on an existing group elsewhere. `regions.default` must be one of them. Left out: any
+region.
+
 ## Running it
 
 Once per PC: the Azure CLI and the GitHub CLI, signed in with an account that is admin of the repository:
@@ -260,7 +273,7 @@ Each resource (in the order asked and saved) has:
 | `size`, `choice`, `variants`, `when`, `optional`, `admin` | Answers asked with it, fields that depend on a choice, asked only for some answers, saved only when used |
 | `tag` | A short label shown with it in lazybicep and in the questions; without one it comes from the map: a choice per environment shows its options (`shared/separate`, or the environment's answer on Home), a `when` resource `only if separate` |
 | `cost` | Its row in the cost estimate (`appServicePlan`, `staticWebApp`, `pennies`, `logs`, `table`) |
-| `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{apiIdentity.clientId}` (`.principalId`, `.id`), `{api.group}`, `{secret.<name>}`, `{webDomain}`... |
+| `appSettings` | An app's settings: `main.bicep` sets them, the setup checks them. `{braces}` are values of other resources: `{storage.tableEndpoint}`, `{insights.connectionString}`, `{sqlServer.host}`, `{apiIdentity.clientId}` (`.principalId`, `.id`), `{api.group}`, `{secret.<name>}`, `{webDomain}`, `{tenantId}` (`tenant().tenantId`), `{loginEndpoint}` (`environment().authentication.loginEndpoint`, `https://login.microsoftonline.com/`)... A container app's `{gateway.host}` comes from its name and its environment's domain (`<name>.<domain>`, internal ingress `<name>.internal.<domain>`), so the app may use its own address in its own settings (`Mcp__PublicBaseUrl = https://{gateway.host}`); `{gateway.signInClientId}` is its sign-in registration's client id, **empty until the step Sign-in app registrations** (the app runs the placeholder until then, so its own image never sees it empty) |
 | `environment`, `registry` | A container app's Container Apps environment and container registry (their keys) |
 | `port`, `cpu`, `memory` | A container app's target port; vCPU (0.25 to 4 in steps of 0.25) and memory (2 GiB per vCPU: `0.5` with `1Gi`) |
 | `minReplicas`, `maxReplicas`, `revisionMode` | Its replicas (min 0 or more, 0 = scales to zero when idle; max 1-1000) and revisions (`single`: a deploy replaces the running one, or `multiple`) |
@@ -389,7 +402,7 @@ the rest is set in the map):
 | `provider` | `entra`, or `none` (off). `"signIn": "entra"` takes the defaults |
 | `unauthenticated` | A request without sign-in: `redirect` (to the sign-in page, the default), `401` or `403` |
 | `excludedPaths` | Paths that pass without sign-in (endpoints with their own authentication). The health path always does, so with sign-in it is never `/` or `/*` (refused: the root is never anonymous); for each `/x/*` also `/x`, which the wildcard doesn't cover |
-| `identifierUri` | `true`: the app registration gets `api://<client id>`, and tokens for it are accepted too (applications that call the app) |
+| `identifierUri` | `true`: the app registration gets `api://<client id>` (the audience of tokens other applications request). The sign-in itself accepts only the client id: it is for users, so an app-only token for the identifier URI (a daemon's client-credential token) does not pass on the signed-in routes; one requested for the client id itself still does, so an app that trusts the platform's principal refuses app-only principals itself. An API for applications lives on an excluded path and validates its own tokens (audience, issuer, roles) |
 | `appRoles` | App roles of the app registration: `{ value, allowed: ["Application" and/or "User"], displayName, description }`. Roles the map doesn't list are kept (removing one is by hand) |
 
 The setup's step **Sign-in app registrations** (after Azure resources, once the app has its address) makes or
@@ -405,7 +418,9 @@ with the map; an app running its own image without sign-in is reported with how 
 (`az containerapp ingress disable`, never by turning the sign-in off).
 
 The step **First image** (after the GitHub environment) gives an app still on the placeholder its own image,
-once its sign-in is in front of it and its Key Vault secrets are in: it runs the app's workflow with
+once its sign-in is in front of it and its Key Vault secrets are in - the ones its settings reference and every
+`by: hand` secret the map gives it (a vault's `secrets[]` with `app` = the app, or without `app` in a vault whose
+`handSecrets` restart it), checked by name before the build and again before the deploy: it runs the app's workflow with
 `push-only` (on the environment's deploy branch, or the default branch for manual runs; the workflow must be
 pushed there), waits for the run, finds the image of the run's commit in the registry and deploys it with
 `main.bicep` (asked), so the app's settings, secrets and probes come with it. From then on the workflow
@@ -470,14 +485,16 @@ into the script: a branch name may hold quotes and semicolons):
 
 A manual run offers production last and preselects the first other environment. One deploy of an app per
 environment runs at a time (`concurrency`). An App Service with a health check path waits after its deploy until
-the app answers it (200, up to 5 minutes), or the run fails: a green deploy means the app started.
+the app answers it (200, a hard 5-minute deadline: every call gets only the time left, the step has
+`timeout-minutes: 6`), or the run fails: a green deploy means the app started.
 
 **A container app's workflow** (`catalog/workflows/containerApp.yml`): an optional test job (`test`, with
 `dotnet` for its .NET setup), the route job, then the deploy: the image built on the runner from `dockerfile`
 and `context`, pushed to the app's registry as `<key in lowercase words>:<commit SHA>` (`adminApi` ->
 `admin-api`), and only the app's image changed (`az containerapp update --image`): its settings, secrets,
 probes and sign-in stay as `main.bicep` made them. Then it waits until the new revision is ready and, with
-external ingress and a health path, the path answers 2xx (up to 5 minutes), or the run fails.
+external ingress and a health path, the path answers 2xx (a hard 5-minute deadline, step `timeout-minutes: 6`),
+or the run fails.
 
 - The GitHub environment's variables: `AZURE_<KEY>_NAME` and `AZURE_<KEY>_GROUP` (the app and its resource
   group) and `AZURE_<REGISTRY>_NAME` (its registry). Without them the deploy is skipped with a notice.
@@ -497,9 +514,10 @@ required reviewers for environments (private repositories below Enterprise) that
 **The apps run as their environment**: `ASPNETCORE_ENVIRONMENT` (App Service, Container Apps) and
 `AZURE_FUNCTIONS_ENVIRONMENT` (function apps) are the environment's name, capitalized (`{envName}`: `Production`, `Test`, `Staging`...; Linux's disk is
 case-sensitive, so `appsettings.Production.json` loads), so environment-specific settings
-files load and non-production behaviour (mail recipient overrides, no production alerts) applies. An environment
-named `development` makes `IsDevelopment()` true in Azure (developer-only switches, in Netmedia backends also
-migrations on startup): give deployed environments other names.
+files load and non-production behaviour (mail recipient overrides, no production alerts) applies. One exception:
+`development` (the full name of `dev`) becomes `Dev`, never `Development`, which would make `IsDevelopment()` true
+in Azure (developer-only switches, in Netmedia backends also migrations on startup; AZ 12.5) - such an app loads
+`appsettings.Dev.json`. The GitHub environment keeps the full name `development` (AZ 12.2).
 
 and signs in to Azure with the GitHub environment's `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID` (OIDC, `azure/login`); each app's name is a variable `AZURE_<KEY>_NAME` (a container
@@ -544,9 +562,12 @@ both work with the database in between.
 ### Actions
 
 Every generated workflow takes its GitHub Actions from `catalog/workflows/actions.json` by a short name
-(`"checkout": "actions/checkout@v7"`): templates write `{{action:checkout}}`, a build's step `"uses": "checkout"`.
-Upgrading an action there (e.g. when GitHub deprecates a Node version) upgrades every workflow on the next
-`.\infra\generate.ps1`.
+(`"checkout": "actions/checkout@<commit sha> # v7.0.1"`): templates write `{{action:checkout}}`, a build's step
+`"uses": "checkout"`. Each is pinned by its full commit SHA, never a tag (a tag can be moved to other code), with
+its release as a YAML comment on the `uses:` line. Upgrading an action there (e.g. when GitHub deprecates a Node
+version) upgrades every workflow on the next `.\infra\generate.ps1`: the release's commit from
+`gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (an annotated tag, `"type": "tag"`, once more through
+`git/tags/<sha>`), written as `<owner>/<repo>@<sha> # <tag>`.
 
 ## Builds
 
@@ -564,7 +585,8 @@ hand-written one into the map, describe it in `builds`, delete the file, generat
 | `jobs` | `{ id, name, needs, if, runsOn, permissions, steps }` |
 
 A step is `{ comment, name, if, id, uses, with, workingDirectory, shell, run }`; `uses` is a name of
-`actions.json` or a full `owner/action@version`, `run` may have several lines.
+`actions.json` or a full `owner/action@<commit sha> # <tag>` (pin by SHA, like `actions.json`), `run` may have
+several lines.
 
 ```json
 "builds": [{
