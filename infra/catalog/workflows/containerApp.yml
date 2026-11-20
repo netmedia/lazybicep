@@ -151,21 +151,28 @@ jobs:
           PUSHED: ${{ steps.push.outputs.image }}
         run: az containerapp update --name "$APP_NAME" --resource-group "$APP_GROUP" --container-name {{containerName}} --image "$PUSHED" --output none
       # The new revision is ready{{healthNote}} within 5 minutes, or the run fails: a green deploy
-      # of an app that doesn't start helps nobody.
+      # of an app that doesn't start helps nobody. A hard deadline: each call gets only the time left, and the
+      # step's timeout ends anything that still hangs.
       - name: Health check
         if: steps.env.outputs.ready && !inputs.push-only
+        timeout-minutes: 6
         env:
           HEALTH_PATH: {{healthPath}}
         run: |
-          for attempt in $(seq 1 30); do
-            state=$(az containerapp show --name "$APP_NAME" --resource-group "$APP_GROUP" --query "{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, fqdn: properties.configuration.ingress.fqdn}" -o json 2>/dev/null || echo '{}')
-            latest=$(echo "$state" | jq -r '.latest // empty'); ready=$(echo "$state" | jq -r '.ready // empty'); fqdn=$(echo "$state" | jq -r '.fqdn // empty')
+          deadline=$(( $(date +%s) + 300 )); latest=; code=
+          while left=$(( deadline - $(date +%s) )); [ "$left" -gt 0 ]; do
+            state=$(timeout "$left" az containerapp show --name "$APP_NAME" --resource-group "$APP_GROUP" --query "{latest: properties.latestRevisionName, ready: properties.latestReadyRevisionName, fqdn: properties.configuration.ingress.fqdn}" -o json 2>/dev/null) || state='{}'
+            latest=$(echo "$state" | jq -r '.latest // empty' 2>/dev/null || true); ready=$(echo "$state" | jq -r '.ready // empty' 2>/dev/null || true); fqdn=$(echo "$state" | jq -r '.fqdn // empty' 2>/dev/null || true)
             if [ -n "$latest" ] && [ "$latest" = "$ready" ]; then
               if [ -z "$HEALTH_PATH" ]; then echo "$latest is ready"; exit 0; fi
-              code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "https://$fqdn$HEALTH_PATH" || true)
-              case "$code" in 2??) echo "https://$fqdn$HEALTH_PATH: $code ($latest)"; exit 0 ;; esac
+              left=$(( deadline - $(date +%s) ))
+              if [ "$left" -gt 0 ]; then
+                code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$(( left < 20 ? left : 20 ))" "https://$fqdn$HEALTH_PATH" || true)
+                case "$code" in 2??) echo "https://$fqdn$HEALTH_PATH: $code ($latest)"; exit 0 ;; esac
+              fi
             fi
-            sleep 10
+            left=$(( deadline - $(date +%s) ))
+            if [ "$left" -gt 0 ]; then sleep "$(( left < 10 ? left : 10 ))"; fi
           done
-          echo "::error::$APP_NAME: revision $latest not ready$(if [ -n "$HEALTH_PATH" ]; then echo " or $HEALTH_PATH answered ${code:-nothing}"; fi) after 5 minutes"; exit 1
+          echo "::error::$APP_NAME: revision ${latest:-(unknown)} not ready$(if [ -n "$HEALTH_PATH" ]; then echo " or $HEALTH_PATH answered ${code:-nothing}"; fi) after 5 minutes"; exit 1
 {{afterDeploy}}

@@ -672,6 +672,14 @@ function Get-Value([string]$Key) {
         if ($script:res[$parts[0]].Group) { return $script:res[$parts[0]].Group }
         return $script:rgName
     }
+    # A container app's sign-in registration (main.bicep's <key>SignInClientId): the saved or live client id.
+    if ($parts[1] -eq 'signInClientId' -and $hostDef -and $hostDef.armType -eq $containerAppType) {
+        $id = [string]$script:choices[(Get-SignInClientIdAnswer $parts[0])]
+        if ($id) { return $id }
+        return $null
+    }
+    # A container app's host is its ingress fqdn: <name>.<environment's domain> (internal: <name>.internal.<domain>),
+    # the same as main.bicep makes from its name and environment.
     $app = $script:apps[$parts[0]]
     if ($app -and $parts[1] -eq 'host') { return Get-AppHost $app }
     if ($app -and $parts[1] -eq 'id') { return $app.id }
@@ -684,7 +692,9 @@ function Expand([string]$Text) {
     foreach ($m in @([regex]::Matches($Text, '\{([^{}]+)\}'))) {
         $value = $null
         foreach ($k in $m.Groups[1].Value.Split('|')) { if (-not $value) { $value = Get-Value $k } }
-        if (-not $value) { $known = $false; continue }
+        # A container app's sign-in client id before the sign-in step: known to be empty (main.bicep passes '').
+        if (-not $value -and $m.Groups[1].Value.Split('|')[-1] -match '^(\w+)\.signInClientId$' -and (Test-SignInOn (Get-Def $Matches[1]))) { $value = '' }
+        elseif (-not $value) { $known = $false; continue }
         $out = $out.Replace($m.Value, [string]$value)
     }
     if ($known) { return $out }
@@ -1366,9 +1376,30 @@ function Test-SignInReady($Def, [string]$ClientId) {
 }
 # The Key Vault secrets a container app's settings read (@Microsoft.KeyVault(VaultName=...;SecretName=...)) that are
 # not in their vault yet, as @{ Vault; Secret; Ref } (names only). Its first image waits for them: a revision with a
-# missing Key Vault secret doesn't start. ({secret.<name>}: the setup keeps it, main.bicep writes it.)
+# missing Key Vault secret doesn't start. ({secret.<name>}: the setup keeps it, main.bicep writes it.) Also every
+# secret put in by hand that the map gives the app (a vault's secrets[] with by: hand and app: this app, or without
+# app in a vault whose handSecrets restart it): the app may read it with its own Key Vault client, no setting.
 function Get-MissingMapSecrets($Def) {
     $out = @()
+    $seen = @{}
+    foreach ($vdef in @($defs | Where-Object { $_.armType -eq 'Microsoft.KeyVault/vaults' })) {
+        $vres = $script:res[$vdef.key]
+        if (-not ($vres -and $vres.Name)) { continue }
+        $readsAll = [bool]($vdef.handSecrets -and [string]$vdef.handSecrets.restart -eq [string]$Def.key)
+        $mine = @($vdef.secrets | Where-Object { $_ -and $_.by -eq 'hand' -and (([string]$_.app -eq [string]$Def.key) -or (-not $_.app -and $readsAll)) })
+        if (-not $mine.Count) { continue }
+        $vault = [string]$vres.Name
+        $id = Get-VaultId $vault
+        if (-not $id) { continue }
+        foreach ($h in $mine) {
+            $secret = [string]$h.name
+            if (-not (Test-SecretName $secret)) { Missing "$($Def.key): the map's secret $secret of $vault (letters, digits and - only): not checked"; continue }
+            $seen["$vault/$secret".ToLower()] = $true
+            $ref = 'put in by hand'
+            if ($h.setting) { $ref = "put in by hand, read as $($h.setting)" }
+            if (-not (Try-Az @('resource', 'show', '--ids', "$id/secrets/$secret"))) { $out += [pscustomobject]@{ Vault = $vault; Secret = $secret; Ref = $ref } }
+        }
+    }
     foreach ($s in @($Def.appSettings | Where-Object { $_ })) {
         $v = [string]$s.value
         if ($v -notmatch 'SecretName=([^;)\s]+)') { continue }
@@ -1378,8 +1409,10 @@ function Get-MissingMapSecrets($Def) {
         if ($v -match 'VaultName=\{(\w+)\.name\}') { if ($script:res[$Matches[1]]) { $vault = [string]$script:res[$Matches[1]].Name } }
         elseif ($v -match 'VaultName=([^;)\s{}]+)') { $vault = $Matches[1] }
         if (-not $vault) { continue }
+        if ($seen["$vault/$secret".ToLower()]) { continue }
         $id = Get-VaultId $vault
         if (-not $id) { continue }
+        $seen["$vault/$secret".ToLower()] = $true
         if (-not (Try-Az @('resource', 'show', '--ids', "$id/secrets/$secret"))) { $out += [pscustomobject]@{ Vault = $vault; Secret = $secret; Ref = [string]$s.name } }
     }
     return $out
@@ -3506,14 +3539,49 @@ function Invoke-RemoveResource {
 
 # --- a new project (an empty instance) ---------------------------------------------------------------
 
+# Extra tags as typed (name=value, comma separated; '-' or nothing: none) -> an ordered name -> value, or the
+# problem as text. The kit's own project, environment and managed-by can't be given (generate.ps1 refuses them too).
+# One tag's problem, '' when it is fine - the same rule as generate.ps1's Get-TagProblem (keep them equal): a name
+# of 1-128 characters without # : < > \ / ? & % " ! or a control character (Azure's limits, and what Invoke-Native
+# can pass to the Azure CLI); a value of up to 256 characters without " % ! or a control character, not ending in \.
+function Get-TagProblem([string]$Name, [string]$Value) {
+    if (@('project', 'environment', 'managed-by') -contains $Name.ToLowerInvariant()) { return "${Name}: the kit's own tag (project, environment, managed-by)" }
+    if (-not $Name -or $Name.Length -gt 128 -or $Name -match '[#:<>\\/?&%"!\x00-\x1f\x7f]') { return "'$Name': a name of 1-128 characters, none of # : < > \ / ? & % "" ! or a control character" }
+    if ($Value.Length -gt 256 -or $Value -match '["%!\x00-\x1f\x7f]' -or $Value.EndsWith('\')) { return "${Name}: a value of up to 256 characters, none of "" % ! or a control character, not ending in \" }
+    return ''
+}
+function ConvertFrom-TagList([string]$Text) {
+    $tags = [ordered]@{}
+    if (-not $Text.Trim() -or $Text.Trim() -eq '-') { return $tags }
+    foreach ($pair in $Text.Split(',')) {
+        if (-not $pair.Trim()) { continue }
+        $at = $pair.IndexOf('=')
+        if ($at -lt 1) { return "$($pair.Trim()): name=value" }
+        $n = $pair.Substring(0, $at).Trim()
+        $v = $pair.Substring($at + 1).Trim()
+        $problem = Get-TagProblem $n $v
+        if ($problem) { return $problem }
+        if ($tags.Contains($n)) { return "$n twice" }
+        $tags[$n] = $v
+    }
+    # At most 50 tags on a resource: the kit's 3 and up to 47 of the project's.
+    if ($tags.Count -gt 47) { return "$($tags.Count) tags, at most 47 (50 on a resource, 3 of them the kit's)" }
+    return $tags
+}
+
 # The map of a project without resources yet: the resource group and GitHub Actions' app registration,
 # which every project has.
-function New-BaseMap([string]$Name, [string]$Description, [string]$Region, [string]$Deployment) {
+function New-BaseMap([string]$Name, [string]$Description, [string]$Region, [string]$Deployment, $Tags, [string[]]$Regions) {
     $rg = Get-Filled (Get-Blueprint 'resourceGroup').entry (New-Placeholders 'resourceGroup' 'Resource group') @{}
     $deploy = Get-Filled (Get-Blueprint 'entraDeployApp').entry (New-Placeholders 'deployApp' 'App registration (Entra)') @{}
+    $project = [pscustomobject][ordered]@{ name = $Name; description = $Description; setup = 'azure-setup.ps1'; template = 'main.bicep'; managedByTag = 'infra/main.bicep'; deploymentName = $Deployment; subscriptionMatch = '' }
+    # The regions the resources may be in (generate.ps1: main.bicep's @allowed), only when limited.
+    if (@($Regions | Where-Object { $_ }).Count) { $project | Add-Member -NotePropertyName 'regions' -NotePropertyValue @($Regions | Where-Object { $_ }) }
+    # The project's own tags on every resource (generate.ps1), only when there are any.
+    if ($Tags -and @($Tags.Keys).Count) { $project | Add-Member -NotePropertyName 'tags' -NotePropertyValue ([pscustomobject]$Tags) }
     return [pscustomobject][ordered]@{
         '$comment'  = "The map of this infrastructure (infra/README.md, 'The map'): every resource of one environment, and how it is named, asked, deployed, sized, priced, connected, checked and removed. infra/azure-setup.ps1 runs from it (-AddResource / -RemoveResource change it), infra/lazybicep.ps1 shows it, infra/generate.ps1 makes infra/main.bicep from it (never edit that)."
-        project     = [pscustomobject][ordered]@{ name = $Name; description = $Description; setup = 'azure-setup.ps1'; template = 'main.bicep'; managedByTag = 'infra/main.bicep'; deploymentName = $Deployment; subscriptionMatch = '' }
+        project     = $project
         regions     = [pscustomobject][ordered]@{ default = $Region; staticWebApp = @('westeurope', 'eastus2', 'centralus', 'westus2', 'eastasia') }
         providers   = @()
         costExtras  = @('Custom domains, certificates, managed identities, app registration')
@@ -3876,13 +3944,37 @@ function Invoke-Init {
         if ($prefix -cmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { break }
         Note 'X lowercase letters and digits, parts separated by single hyphens'
     }
+    # The regions the resources may be in (project.regions: main.bicep allows no other, the setup offers only
+    # these), e.g. westeurope, northeurope, swedencentral for EU only; '-' = any region.
+    $default = '-'
+    if ($p -and $p.regions) { $default = (@($p.regions) | ForEach-Object { [string]$_ }) -join ', ' }
+    while ($true) {
+        $regions = @((Ask "Regions the resources may be in (comma separated, '-' any)" $default).Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -and $_ -ne '-' })
+        $bad = @($regions | Where-Object { $_ -cnotmatch '^[a-z][a-z0-9]{1,40}$' })
+        $twice = @($regions | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+        if (-not $bad.Count -and -not $twice.Count) { break }
+        $problem = "region names as Azure writes them (westeurope), each once: $(@($bad + $twice) -join ', ')"
+        Note "X $problem"
+        if ($script:auto) { throw "project.regions: $problem" }
+    }
     $default = 'westeurope'
+    if ($regions.Count) { $default = $regions[0] }
     if ($p -and $p.region) { $default = $p.region }
-    $region = Ask 'Region' $default
+    if ($regions.Count) { $region = Select-Option 'Default region' $regions $default }
+    else { $region = Ask 'Region' $default }
     $default = $prefix.Split('-')[-1] + '-{env}'
     if ($p -and $p.deploymentName) { $default = $p.deploymentName }
     $deployment = Ask "Name of the deployments in Azure ({env} = the environment)" $default
-    $script:map = New-BaseMap $name $description $region $deployment
+    # Extra tags (AZ 2: client, owner...) next to the kit's own project, environment and managed-by.
+    $default = '-'
+    if ($p -and $p.tags) { $default = (@($p.tags.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" })) -join ', ' }
+    while ($true) {
+        $tags = ConvertFrom-TagList (Ask "Extra tags for every resource (name=value, comma separated, '-' none)" $default)
+        if ($tags -is [hashtable] -or $tags -is [Collections.Specialized.OrderedDictionary]) { break }
+        Note "X $tags"
+        if ($script:auto) { throw "project.tags: $tags" }
+    }
+    $script:map = New-BaseMap $name $description $region $deployment $tags $regions
     $script:defs = @($script:map.resources)
     $naming.defaults.prefix = $prefix
 
@@ -4062,6 +4154,8 @@ function Invoke-Setup {
     $script:vals['kvdns'] = '.vault.azure.net' # environment().suffixes.keyvaultDns in Azure's public cloud
     $script:vals['ghEnv'] = $ghEnv
     $script:vals['envName'] = $ghEnv.Substring(0, 1).ToUpper() + $ghEnv.Substring(1) # Production (main.bicep: the same)
+    # development -> Dev (main.bicep: the same): Development would make IsDevelopment() true in Azure (AZ 12.5).
+    if ($ghEnv -ceq 'development') { $script:vals['envName'] = 'Dev' }
     $envFile = Join-Path $infra "environments\$envAbbr.json"
     $script:saved = Read-Json $envFile
     $saved = $script:saved
@@ -4121,6 +4215,12 @@ function Invoke-Setup {
     $tenant = $chosen.tenantId
     $script:vals['subscription'] = $subscription
     $script:vals['tenant'] = $tenant
+    # {tenantId} and {loginEndpoint}: main.bicep's tenant().tenantId and environment().authentication.loginEndpoint
+    # (the active cloud's sign-in address, with the trailing slash Bicep gives).
+    $script:vals['tenantId'] = $tenant
+    $login = [string](Try-Az @('cloud', 'show', '--query', 'endpoints.activeDirectory'))
+    if (-not $login) { $login = 'https://login.microsoftonline.com' }
+    $script:vals['loginEndpoint'] = $login.TrimEnd('/') + '/'
     Ok "subscription $($chosen.name)"
 
     Head 'Prefix (infra/README.md, "Naming")'
@@ -4135,17 +4235,32 @@ function Invoke-Setup {
     $project = $script:prefix
 
     Head 'Region'
+    # The regions the resources may be in (project.regions, e.g. EU only); none = any.
+    $allowedRegions = @($map.project.regions | Where-Object { $_ } | ForEach-Object { [string]$_ })
     $rgDef = $defs | Where-Object { $_.ask -eq 'group' } | Select-Object -First 1
     $script:rgName = Read-Name $rgDef.label $rgDef.type (Get-Default $rgDef.key (Get-RuleName $rgDef.type))
     $rgName = $script:rgName
     $script:vals['rg'] = $rgName
     $rgExists = [bool](Invoke-Az @('group', 'exists', '-n', $rgName))
+    # The map's own tags (project.tags): on the group the setup creates; main.bicep puts them on every resource
+    # (the what-if shows one without them). An existing group lacking one is reported only.
+    $extraTags = [ordered]@{}
+    if ($map.project.tags) { foreach ($t in @($map.project.tags.PSObject.Properties)) { $extraTags[[string]$t.Name] = [string]$t.Value } }
     if ($rgExists) {
-        $location = (Invoke-Az @('group', 'show', '-n', $rgName)).location
+        $rgShown = Invoke-Az @('group', 'show', '-n', $rgName)
+        $location = $rgShown.location
+        $rgLacks = @($extraTags.Keys | Where-Object { -not ($rgShown.tags -and $rgShown.tags.PSObject.Properties[$_] -and [string]$rgShown.tags.PSObject.Properties[$_].Value -eq $extraTags[$_]) })
+        if ($rgLacks.Count) { Note "resource group ${rgName}: lacks the map's tag$(if ($rgLacks.Count -gt 1) { 's' }) $($rgLacks -join ', ') (project.tags; az group update -n $rgName --set tags.<name>=<value>)" }
+        # main.bicep's location is the group's region: one outside project.regions would fail the deployment.
+        if ($allowedRegions.Count -and $allowedRegions -cnotcontains [string]$location) { throw "Resource group $rgName is in $location, outside the project's regions ($($allowedRegions -join ', '), project.regions): use a group in one of them." }
     } else {
         $default = [string]$map.regions.default
         if ($saved -and $saved.location) { $default = $saved.location }
-        $location = Ask 'Region' $default
+        if ($allowedRegions.Count) {
+            # Only the project's regions (project.regions; main.bicep allows no other).
+            if ($allowedRegions -cnotcontains $default) { $default = [string]$map.regions.default }
+            $location = Select-Option 'Region' $allowedRegions $default
+        } else { $location = Ask 'Region' $default }
     }
     $script:location = $location
     $state = 'new'
@@ -4154,10 +4269,15 @@ function Invoke-Setup {
     Mark $rgDef.key $rgName $state ''
     $script:res[$rgDef.key] = [pscustomobject]@{ Name = $rgName; Group = ''; Found = $null }
     $hasStatic = [bool]@($defs | Where-Object { $_.armType -eq 'Microsoft.Web/staticSites' }).Count
-    if (-not $hasStatic -or $staticLocations -contains $location) { $staticLocation = $location } else {
+    # Static Web Apps are offered in a few regions; with project.regions only those of them (main.bicep's @allowed).
+    $staticOffered = @($staticLocations)
+    if ($allowedRegions.Count) { $staticOffered = @($staticOffered | Where-Object { $allowedRegions -ccontains [string]$_ }) }
+    if (-not $hasStatic -or $staticOffered -contains $location) { $staticLocation = $location } else {
+        if (-not $staticOffered.Count) { throw "None of the project's regions ($($allowedRegions -join ', ')) offers Static Web Apps ($($staticLocations -join ', '))." }
         $default = [string]$map.regions.default
         if ($saved -and $saved.staticLocation) { $default = $saved.staticLocation }
-        $staticLocation = Select-Option 'Region of the Static Web App (offered in a few only)' $staticLocations $default
+        if ($staticOffered -notcontains $default) { $default = [string]$staticOffered[0] }
+        $staticLocation = Select-Option 'Region of the Static Web App (offered in a few only)' $staticOffered $default
     }
 
     Head 'Names (Enter = the value in brackets)'
@@ -4292,7 +4412,9 @@ function Invoke-Setup {
     $haveRg = $rgExists
     if ($haveRg) { Ok "resource group $rgName ($location)" }
     elseif (Confirm-Step "Create the resource group $rgName in $($location)?") {
-        Invoke-Az @('group', 'create', '-n', $rgName, '-l', $location, '--tags', "project=$project", "environment=$ghEnv") | Out-Null
+        $rgTags = @("project=$project", "environment=$ghEnv")
+        foreach ($t in @($extraTags.Keys)) { $rgTags += "$t=$($extraTags[$t])" }
+        Invoke-Az (@('group', 'create', '-n', $rgName, '-l', $location, '--tags') + $rgTags) | Out-Null
         $haveRg = $true
         Ok "resource group $rgName created ($location)"
         Mark $rgDef.key $rgName 'created' ''
@@ -4463,7 +4585,8 @@ function Invoke-Setup {
                 if (-not $expect) { if (-not $value) { $wrong += $s.name }; continue }
                 $expected = Expand $expect
                 if ($null -eq $expected) { if ($s.unknown -eq 'wrong' -or -not $value) { $wrong += $s.name }; continue }
-                if ($s.value -and $value -ne $expected) { $wrong += $s.name }
+                # [string]: an empty expected value ({<key>.signInClientId} before sign-in) matches one Azure leaves out.
+                if ($s.value -and [string]$value -ne $expected) { $wrong += $s.name }
                 elseif ($s.prefix -and (-not $value -or -not $value.StartsWith($expected, [StringComparison]::OrdinalIgnoreCase))) { $wrong += $s.name }
             }
             $wrong = @($wrong | Select-Object -Unique)

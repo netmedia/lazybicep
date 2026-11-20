@@ -45,6 +45,14 @@ the app's map entry has `signIn`:
   `https://<fqdn>/.auth/login/aad/callback`, no client secret, token store off; optional identifier URI and app roles
   for APIs that accept tokens from other applications), with *Assignment required* and the group asked per
   environment;
+- the sign-in is **for users**: its allowed audience is the client id only, never the identifier URI. With
+  `api://<client id>` accepted too, an app-only token issued for that URI (client credentials of a daemon or another
+  API sharing the registration) would pass on every signed-in route, where the app treats the caller as a signed-in
+  user (CWE-863). This narrows the gap but does not close it: a client-credentials token requested for the client id
+  itself (`<client id>/.default`) has the client id as its audience and passes, so an app that trusts the platform's
+  principal must also refuse app-only principals (no user claim such as `name` / `preferred_username` / `upn`, or
+  `idtyp=app`). An API that applications call lives on an excluded path and validates its own tokens (audience,
+  issuer, roles);
 - **excluded paths** pass without sign-in (health checks, endpoints with their own authentication); for each `/x/*`
   the kit also excludes `/x`, which the wildcard does not cover; the health path is always excluded, so it is never
   `/` or `/*` for an app with sign-in (the generator refuses it: the root must never be anonymous);
