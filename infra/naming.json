@@ -3,11 +3,13 @@
   "pattern": "{prefix}-{sub}-{type}-{env}",
   "insightsPattern": "{prefix}-{sub}-{type}-{env}-insights",
   "sharedInsightsPattern": "{prefix}-{sub}-{env}-insights",
+  "$identityPattern": "An app's own user-assigned identity: {apptype} is the naming type of the app that owns it, so two apps without a sub application name never share a name (docs/architecture/identities.md).",
+  "identityPattern": "{prefix}-{sub}-{apptype}-ident-{env}",
   "defaults": {
     "prefix": "nm-app"
   },
   "$targets": "Deployment targets: each has its own sub application name, asked by the setup ('-' for none). The environment's shared resources have none.",
-  "targets": ["statapp", "apiapp", "webapp", "func", "dfunc"],
+  "targets": ["statapp", "apiapp", "webapp", "func", "dfunc", "contapp"],
   "types": {
     "statapp": "static app (the usual frontend app)",
     "apiapp": ".NET API web app",
@@ -27,7 +29,11 @@
     "queue": "storage queue",
     "appconf": "App Configuration store",
     "blob": "blob container",
-    "evgs": "Event Grid subscription"
+    "evgs": "Event Grid subscription",
+    "contapp": "container app (Azure Container Apps)",
+    "contenv": "Container Apps environment",
+    "contreg": "container registry",
+    "ident": "user-assigned managed identity (owned by one app)"
   },
   "environments": {
     "prod": "production",
@@ -36,7 +42,7 @@
     "dev": "development",
     "accp": "acceptance"
   },
-  "noHyphens": ["store"],
+  "noHyphens": ["store", "contreg"],
   "maxLength": {
     "resgr": 90,
     "appplan": 40,
@@ -55,6 +61,10 @@
     "queue": 63,
     "appconf": 50,
     "blob": 63,
-    "evgs": 64
+    "evgs": 64,
+    "contapp": 32,
+    "contenv": 60,
+    "contreg": 50,
+    "ident": 128
   }
 }

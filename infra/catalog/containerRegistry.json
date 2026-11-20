@@ -1,0 +1,32 @@
+{
+  "kind": "containerRegistry",
+  "title": "Container registry",
+  "about": "An Azure Container Registry for the container apps' images: admin user and anonymous pull off, the apps pull with their own managed identities (AcrPull), GitHub Actions pushes with OIDC (AcrPush). Basic by default.",
+  "addable": true,
+  "keyDefault": "registry",
+  "naming": { "type": "contreg" },
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (letters and digits, globally unique: <name>.azurecr.io)",
+    "type": "contreg",
+    "armType": "Microsoft.ContainerRegistry/registries",
+    "ask": "own",
+    "free": "registryName",
+    "apiVersion": "2025-04-01",
+    "param": "<key>Name",
+    "kind": "containerRegistry",
+    "role": "Images of the container apps: pulled with their managed identities, pushed by GitHub Actions (no admin user, no anonymous pull)",
+    "size": { "answer": "<key>Sku", "param": "<key>Sku", "label": "Tier of <title>", "options": ["Basic", "Standard", "Premium"], "default": "Basic", "readCurrent": true },
+    "cost": { "kind": "table", "order": 6, "label": "Container registry {name} ({size})", "prices": { "Basic": 4.30, "Standard": 17.20, "Premium": 43.00 } }
+  },
+  "users": {
+    "kinds": ["containerApp"],
+    "question": "Which container apps pull their image from <title>?",
+    "connection": { "kind": "role", "roles": ["AcrPull"], "what": "pulls its image", "via": "its managed identity (AcrPull)" },
+    "settings": []
+  },
+  "github": { "deployRole": "AcrPush", "variable": "AZURE_<KEY>_NAME" },
+  "providers": ["Microsoft.ContainerRegistry"],
+  "removeOrder": { "types": ["Microsoft.ContainerRegistry/registries"], "before": [] }
+}

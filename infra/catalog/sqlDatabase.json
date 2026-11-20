@@ -29,11 +29,11 @@
     }
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps use <title>?",
     "connection": { "kind": "sql", "dbRoles": ["db_datareader", "db_datawriter"], "dbGrants": ["EXECUTE ON SCHEMA::dbo"], "what": "reads and writes", "via": "its managed identity: a database user (step Database access)" },
     "settings": [
-      { "name": "ConnectionStrings__<Key>", "value": "Server=tcp:{<host>.host},1433;Database={<key>.name};Authentication=Active Directory Default;Encrypt=True;" }
+      { "name": "ConnectionStrings__<Key>", "value": "Server=tcp:{<host>.host},1433;Database={<key>.name};Authentication=Active Directory Default;User Id={<app>Identity.clientId};Encrypt=True;" }
     ]
   },
   "providers": ["Microsoft.Sql"],

@@ -16,7 +16,7 @@
     "armType": "Microsoft.ServiceBus/namespaces",
     "ask": "own",
     "free": "nameAvailable",
-    "apiVersion": "2021-11-01",
+    "apiVersion": "2024-01-01",
     "param": "<key>Name",
     "kind": "serviceBus",
     "queues": "<q.queues[]>",
@@ -25,7 +25,7 @@
     "cost": { "kind": "table", "order": 30, "label": "Service Bus {name} ({size})", "prices": { "Standard": 8.80 }, "texts": { "Basic": "< 0.10 (per million operations)" } }
   },
   "users": {
-    "kinds": ["appService", "functionApp"],
+    "kinds": ["appService", "functionApp", "containerApp"],
     "question": "Which apps use <title>?",
     "roles": { "question": "What may <app> do on <title>?", "options": ["Azure Service Bus Data Sender", "Azure Service Bus Data Receiver"], "default": ["Azure Service Bus Data Sender", "Azure Service Bus Data Receiver"] },
     "connection": { "kind": "role", "what": "sends and receives messages", "via": "its managed identity" },

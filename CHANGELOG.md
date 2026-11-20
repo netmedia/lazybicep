@@ -4,7 +4,88 @@ What changed in LazyBicep, newest first. The kit's version is in `infra/kit.json
 with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet run against Azure:
 [docs/TODO.md](docs/TODO.md).
 
-## Unreleased (on `develop`, the default branch)
+## 0.2.0 (on `develop`, the default branch; not tagged yet)
+
+Everything since 0.1.0. Why the identity model and the Container Apps kinds are built this way:
+[docs/architecture/](docs/architecture/README.md).
+
+### Every app has its own identity
+
+- **App-owned user-assigned identities**: every App Service, Function App and Container App signs in to Azure as
+  its own user-assigned managed identity (new kind `appIdentity`, naming type `ident`, named
+  `{prefix}-{sub}-{apptype}-ident-{env}` by `naming.json`'s `identityPattern`), made with the app (`creates`),
+  removed with it, never shared, one per app per environment. Its roles, Key Vault reads and SQL database user
+  exist before the app starts. No system-assigned identity any more.
+- Settings: `AZURE_CLIENT_ID` for every app; `keyVaultReferenceIdentity` (App Service, Function App);
+  `AzureWebJobsStorage__credential` / `__clientId` and Flex deployment storage as `UserAssignedIdentity`
+  (Function App); `<Name>__credential` / `__clientId` next to a function app's identity-based connections; SQL
+  connection strings with `User Id=<client id>`. Brace values `{<key>Identity.clientId}`, `.principalId`, `.id`.
+- `-Check` reports an `ident` identity no app of the map owns, and roles on an app identity's own scope that let
+  someone attach it elsewhere (Managed Identity Operator, Managed Identity Contributor, Contributor, Owner, User
+  Access Administrator). Reported only.
+- Removal: an app's role assignments first, then the app, then its identity (`-RemoveResource` and `-Remove`).
+- **Maps from 0.1.0**: none is in use, so nothing breaks; an app entry without `identity` keeps its
+  system-assigned identity until it is removed and added again. An imported app (connect) on a system-assigned
+  identity is switched to its own by the start; the next steps list the old identity's role assignments and SQL
+  users to remove by hand.
+
+### Container Apps
+
+- **`containerApp`** (naming type `contapp`, a deployment target): a containerised app from its Dockerfile on
+  Azure Container Apps, HTTPS only, external or internal ingress, port, vCPU / memory, replicas, revision mode,
+  sticky sessions, startup / liveness / readiness probes on its health path (within the platform's limits), Key
+  Vault secrets by reference (`keyVaultUrl` + its identity, `secretRef`; never a value in `main.bicep`).
+- **`containerAppsEnvironment`** (`contenv`): workload profiles with the Consumption profile, logs to a Log
+  Analytics workspace of the map through a diagnostic setting. **`containerRegistry`** (`contreg`): Basic by
+  default, admin user and anonymous pull off, the name checked globally; the apps pull with AcrPull on their
+  identity. A new project gets the app, its environment and registry from one pick.
+- **The image belongs to the app's workflow**: a new app starts with the placeholder
+  `mcr.microsoft.com/k8se/quickstart:latest`; every later start passes back the image Azure runs, so `main.bicep`
+  never changes it.
+- **Sign-in** (`signIn`): the platform's sign-in with Entra ID (ID token, no client secret, token store off;
+  redirect or 401; excluded paths, `/x` with each `/x/*`, the health path always; optional identifier URI and app
+  roles). The new step **Sign-in app registrations** makes or updates the app registration per environment, each
+  change asked (redirect, ID tokens, Assignment required with the group asked per environment), and runs
+  `main.bicep` again with its client id in the same start.
+- The new step **First image**: runs the app's workflow with `push-only`, waits for it and deploys the pushed
+  image with `main.bicep`, once the sign-in and the Key Vault secrets are there.
+- **Deploy workflow** `catalog/workflows/containerApp.yml`: image built on the runner, pushed tagged with the
+  commit SHA, only the image updated, then the health wait (2xx, up to 5 minutes); OIDC with AcrPush on the
+  registry and Container Apps Contributor on the app; variables `AZURE_<KEY>_NAME`, `AZURE_<KEY>_GROUP`,
+  `AZURE_<REGISTRY>_NAME`; `deploy.env` as BuildKit secrets. Refuses an app on the placeholder or without its
+  sign-in.
+- Cost estimate (registry by tier, apps at the Consumption price of their minimum replicas), `-Check` (image,
+  sign-in, Key Vault secrets), removal order (app, then identity; environment and registry only when no app uses
+  them). Roles AcrPull, AcrPush, Container Apps Contributor; Key Vault, Service Bus, storage and SQL take
+  container apps as users.
+- Not yet: custom domains and private networking (VNet) for container apps, an environment or registry shared
+  from another resource group, `deploy.migrate` in a container app's workflow.
+
+### Import and analysis
+
+- The import reads Container Apps, their environments and registries (image only as information, sign-in
+  settings, Key Vault secret names; never values) and user-assigned identities: the identity of exactly one
+  imported app becomes that app's, a shared or unused one is reported.
+- The analysis suggests a container app for a .NET web project, Node or Python server with a `Dockerfile` (or
+  `Containerfile`) in its folder: port from `EXPOSE`, build context from what it copies, one environment and one
+  registry for all.
+
+### Other changes
+
+- Hand-secret next steps write `az keyvault secret set ... --file <a file only you can read> --encoding utf-8`:
+  the value never goes into the process list or the shell history.
+- Service Bus API `2024-01-01` (the `minimumTlsVersion` lint warning on `2021-11-01`).
+- `logAnalytics` also serves a Container Apps environment.
+- **Entra app registrations are adopted by id, never by display name alone** (the sign-in registrations and the
+  GitHub deploy registration): the saved client id first, then the live sign-in's client id; a registration found
+  only by its name is taken only when you are its sole owner (else the run stops and says so). New registrations
+  and service principals get you as their owner; `-Check` reports owner, redirect, ID-token and
+  Assignment-required drift. An environment whose deploy registration has no owner: set `<deployKey>ClientId` in
+  `infra/environments/<env>.json` or add yourself as its owner.
+- Values from the environment's answers, Azure and Graph are checked before they reach `az` / `gh` (group ids as
+  GUIDs, Key Vault secret names, redirect and identifier URIs), and arguments to `az.cmd` with `"`, `%` or line
+  breaks are refused.
+- `docs/tools/build-docx.ps1` takes Netmedia's document template from the `netmedia-document` plugin's theme.
 
 ### New project: from the solution or from Azure
 

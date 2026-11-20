@@ -9,8 +9,12 @@ and removes it, environment by environment.
 - **The map** (`infra/infra.map.json`) says what the project has: its apps, databases, queues, vaults,
   telemetry, and how they connect (roles of managed identities, settings, telemetry, deploy roles).
 - **The catalog** (`infra/catalog/`) knows how each kind is made: an API on App Service, a Static Web App,
-  a function app (Flex Consumption or on a plan), SQL server and database, Service Bus, a storage queue,
-  storage, Key Vault, Application Insights. Several of a kind is fine (two APIs, two databases).
+  a function app (Flex Consumption or on a plan), a container app on Azure Container Apps (with its Container
+  Apps environment and container registry), SQL server and database, Service Bus, a storage queue, storage,
+  a blob container, Key Vault, App Configuration, Application Insights, Front Door, an Event Grid
+  subscription. Several of a kind is fine (two APIs, two databases).
+- **Every app has its own identity**: a user-assigned managed identity made and removed with the app, never
+  shared, with its roles in place before the app starts.
 - **`main.bicep` is generated** from the map, never written by hand.
 - **The setup** (`azure-setup.ps1`) asks the names of an environment, compares Azure with the template
   (what-if) and creates only what is missing, each change asked first: resources, the apps' database
@@ -56,7 +60,7 @@ It asks first whether to **analyze the solution**, **import from Azure**, or add
 The import reads resource groups that exist already: pick them and their resources, then **connect** (the
 map takes them over with their real names, and a start adds what is missing: managed identities, roles,
 GitHub deployments) or **new** (the same resources made new by the map's definitions). The analysis: the .NET projects, `package.json` and Python projects
-become the apps, and connection strings, packages and code tell what they use (SQL databases, Service Bus
+become the apps (a container app when a Dockerfile is beside one), and connection strings, packages and code tell what they use (SQL databases, Service Bus
 and its queues, storage and queues, Key Vault, Application Insights). Each suggestion is offered with what
 it was found from; the usual questions follow with its answers as the defaults. It also sorts every
 setting each app reads: identity-based settings under the app's own names, secrets for Key Vault (you put
@@ -96,6 +100,7 @@ Replaces the kit's files (`infra/kit.json` lists them), keeps the project's (`in
 `naming.json`, `environments/`, `README.md`).
 
 Everything else (the map's fields, the catalog, naming, workflows): [`infra/LAZYBICEP.md`](infra/LAZYBICEP.md).
+Why it is built this way: [`docs/architecture/`](docs/architecture/README.md).
 
 ## In this repository
 
@@ -106,6 +111,8 @@ Everything else (the map's fields, the catalog, naming, workflows): [`infra/LAZY
 | `infra/` | The kit: an empty instance (no map yet) |
 | `infra/LAZYBICEP.md` | Everything about it: the map, the catalog, the runs, naming, workflows |
 | `examples/spec.example.json` | A new project from a spec: two APIs, a web app, SQL, Service Bus, Key Vault, telemetry |
+| `examples/spec.containerapp.json` | A container app with sign-in (new environment and registry) next to a Flex Consumption function app, Key Vault |
+| `docs/architecture/` | Why the kit builds infrastructure the way it does (managed identities, Container Apps): the first chapters of Netmedia's Infrastructure Architecture Guide |
 | `docs/DEVELOPER-GUIDE.md` | Installing LazyBicep, adding it to a project and every workflow, with diagrams and screenshots |
 | `docs/LazyBicep-Developer-Guide.docx` | The same guide in Word, in Netmedia's document template (`docs/tools/build-docx.ps1` makes it) |
 | `docs/tools/` | `screenshots.ps1` (the guide's UI screenshots, from the Contoso Shop demo) and `build-docx.ps1` |

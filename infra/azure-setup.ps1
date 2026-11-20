@@ -39,7 +39,9 @@ answers are saved and the first change is made). When the environment's answers 
      branch that deploys to the environment. A name found in the subscription is used (shared resources
      also from another resource group, as they are); a new one is created. Saved in
      infra/environments/<env>.json (commit it).
-  1. Azure resources: resource providers, the resource group, infra/main.bicep (what-if shown first).
+  1. Azure resources: resource providers, the resource group, infra/main.bicep (what-if shown first). A
+     container app keeps the image it runs (a new one starts with the placeholder until its workflow runs);
+     one with sign-in gets its app registration (Sign-in app registrations), then main.bicep again.
   2. GitHub -> Azure trust (OIDC): app registration, service principal, federated credential for the
      GitHub environment, the deploy role on each app.
   3. GitHub environment: deployments only from its branch, the map's variables and the Static Web Apps'
@@ -320,8 +322,13 @@ function Show-Usage {
     & $b 'A RUN, STEP BY STEP'
     & $d '  0. Answers (saved in infra/environments/<env>.json; Enter keeps the value in'
     & $d '     brackets, < goes back to change an answer; the monthly budget after the cost)'
-    & $d '  1. Azure resources   Database access   Budget (mails at 80 % and 100 %, and forecast)'
-    & $d '  2. GitHub -> Azure trust   3. GitHub environment   4. Custom domains   5. Live'
+    & $d '  1. Azure resources   Sign-in app registrations (container apps: by their saved'
+    & $d '     client id; by name only what you alone own)   Database access'
+    & $d '     Budget (mails at 80 % and 100 %, and forecast)'
+    & $d '  2. GitHub -> Azure trust   3. GitHub environment'
+    & $d '     First image (container apps still on the placeholder: their workflow with'
+    & $d '     push-only, then main.bicep with the image)'
+    & $d '  4. Custom domains   5. Live'
     & $d '  Then the next steps by hand and everything still open.'
     Write-Host ''
     & $b 'NEEDS'
@@ -366,7 +373,20 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 # The map's resources by key, and what the run learns about them: the answers (names, groups, found),
 # the apps as Azure shows them, the choices (sizes, domains...), the values {braces} are filled with.
 function Get-Def([string]$Key) { return $defs | Where-Object { $_.key -eq $Key } | Select-Object -First 1 }
-$appTypes = @('Microsoft.Web/sites', 'Microsoft.Web/staticSites')
+$appTypes = @('Microsoft.Web/sites', 'Microsoft.Web/staticSites', 'Microsoft.App/containerApps')
+# Every app's own user-assigned identity (infra/LAZYBICEP.md, "Identity"): made and removed with its app,
+# deleted after the apps that use it.
+$identityType = 'Microsoft.ManagedIdentity/userAssignedIdentities'
+$identityAppTypes = @('Microsoft.Web/sites', 'Microsoft.App/containerApps')
+# Container Apps (docs/architecture/container-apps.md): the infrastructure never changes the image an app runs.
+# A new app starts with the public placeholder (main.bicep: <key>Image = ''); every later start passes the image
+# Azure runs now; the app's workflow deploys its own. Removed before their environment and registry.
+$containerAppType = 'Microsoft.App/containerApps'
+$containerEnvType = 'Microsoft.App/managedEnvironments'
+$registryType = 'Microsoft.ContainerRegistry/registries'
+$placeholderImage = 'mcr.microsoft.com/k8se/quickstart@sha256:3a4d93c34c6753f24765ab17a36f1754aee9b02082b7d9553d17697b9e8252c4'
+# The resource providers these kinds need, registered in step 1 when the map uses them.
+$usedProviders = @('Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights')
 $script:res = [ordered]@{}
 $script:apps = @{}
 $script:choices = [ordered]@{}
@@ -506,10 +526,67 @@ function Select-Option([string]$Question, [string[]]$Options, [string]$Default) 
 
 # --- az, gh, files --------------------------------------------------------------------------------
 
+# az on Windows is az.cmd, and PowerShell starts a .cmd/.bat through cmd.exe, which parses the arguments again:
+# & | < > ^ ( ) run or redirect something else, " ends quoting, % and ! expand variables, a line break ends the
+# command. PowerShell quotes an argument only when it has whitespace, so 'x&echo.INJECTED' reaches cmd.exe bare and
+# runs echo. So cmd.exe never sees az's arguments: the Azure CLI's az.cmd only runs
+# "<its folder>\..\python.exe -IBm azure.cli %*" (AZ_INSTALLER=MSI), and that python is started directly here.
+# Any other batch file (or an az.cmd without that python) gets only arguments cmd.exe leaves alone
+# (Assert-BatchSafe). JSON never goes inline (--body @file).
+$script:nativeExe = @{}
+# How $Exe runs: @{ Path; Batch (a .cmd/.bat); Python (the Azure CLI's python.exe next to az.cmd, else '') }.
+function Resolve-NativeExe([string]$Exe) {
+    if (-not $script:nativeExe.ContainsKey($Exe)) {
+        $path = [string](@(Get-Command $Exe -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1 | ForEach-Object { $_.Source })
+        if (-not $path) { $path = $Exe }
+        $python = ''
+        if ([IO.Path]::GetFileName($path) -ieq 'az.cmd' -and [IO.Path]::IsPathRooted($path)) {
+            $candidate = [IO.Path]::GetFullPath([IO.Path]::Combine([IO.Path]::GetDirectoryName($path), '..', 'python.exe'))
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $python = $candidate }
+        }
+        $script:nativeExe[$Exe] = [pscustomobject]@{ Path = $path; Batch = [bool]($path -match '\.(cmd|bat)$'); Python = $python }
+    }
+    return $script:nativeExe[$Exe]
+}
+# An argument for a batch file: only characters cmd.exe takes literally (an allow-list, not a deny-list). One with a
+# space PowerShell puts in quotes, inside which cmd.exe leaves & | < > ^ ( ) alone - but a " would end the quotes,
+# % and ! still expand, a control character ends the line, and a \ before the closing quote escapes it for the
+# program: those stay refused.
+function Assert-BatchSafe([string]$Exe, [string[]]$Arguments) {
+    foreach ($a in @($Arguments)) {
+        $s = [string]$a
+        if ($s -cmatch '^[A-Za-z0-9 @._:/=,+~\\\[\]''?*{}$#-]*$' -and -not ($s.Contains(' ') -and $s.EndsWith('\'))) { continue }
+        if ($s.Contains(' ') -and $s -notmatch '["%!\x00-\x1f\x7f]' -and -not $s.EndsWith('\')) { continue }
+        throw "refused: an argument for $Exe (a batch file, parsed again by cmd.exe) has a character cmd.exe would act on: $($s -replace '[\x00-\x1f\x7f]', ' ')"
+    }
+}
+# An argument for a program started directly (the Azure CLI's python): Windows PowerShell 5.1 passes a " inside an
+# argument unescaped (the program would split it into several), a control character has no place in one, and a \
+# at the end of an argument with a space escapes the closing quote.
+function Assert-DirectSafe([string]$Exe, [string[]]$Arguments) {
+    foreach ($a in @($Arguments)) {
+        $s = [string]$a
+        if ($s -notmatch '["\x00-\x1f\x7f]' -and -not ($s -match '\s' -and $s.EndsWith('\'))) { continue }
+        throw "refused: an argument for $Exe has a "", a control character or (with a space) a \ at its end: $($s -replace '[\x00-\x1f\x7f]', ' ')"
+    }
+}
 function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+    $n = Resolve-NativeExe $Exe
     $prev = $ErrorActionPreference
+    $prevInstaller = $env:AZ_INSTALLER
+    if ($n.Python) { Assert-DirectSafe $Exe $Arguments }
+    elseif ($n.Batch) { Assert-BatchSafe $Exe $Arguments }
     $ErrorActionPreference = 'Continue'
-    try { $out = & $Exe @Arguments 2>&1 } finally { $ErrorActionPreference = $prev }
+    try {
+        if ($n.Python) {
+            # What az.cmd does, without cmd.exe in between.
+            $env:AZ_INSTALLER = 'MSI'
+            $out = & $n.Python -IBm azure.cli @Arguments 2>&1
+        } else { $out = & $Exe @Arguments 2>&1 }
+    } finally {
+        $ErrorActionPreference = $prev
+        if ($n.Python) { $env:AZ_INSTALLER = $prevInstaller }
+    }
     $code = $LASTEXITCODE
     $errors = @($out | Where-Object { $_ -is [Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
     $text = (@($out | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] }) -join "`n").Trim()
@@ -584,8 +661,19 @@ function Get-Value([string]$Key) {
         if ($hostDef.kind -eq 'serviceBus') { return $script:res[$parts[0]].Name + '.servicebus.windows.net' }
         if ($hostDef.kind -eq 'appConfiguration') { return $script:res[$parts[0]].Name + '.azconfig.io' }
     }
+    # An app's identity: its client id (AZURE_CLIENT_ID...), principal id and resource id, once it exists.
+    if ($hostDef -and $hostDef.armType -eq $identityType -and @('clientId', 'principalId', 'id') -contains $parts[1]) {
+        $ident = Get-IdentityOf $parts[0]
+        if ($ident) { return $ident.($parts[1]) }
+        return $null
+    }
+    # A resource's group: the environment's, or the one it is shared from (GitHub variables AZURE_<KEY>_GROUP).
+    if ($parts[1] -eq 'group' -and $script:res[$parts[0]] -and $script:res[$parts[0]].Name) {
+        if ($script:res[$parts[0]].Group) { return $script:res[$parts[0]].Group }
+        return $script:rgName
+    }
     $app = $script:apps[$parts[0]]
-    if ($app -and $parts[1] -eq 'host') { return $app.defaultHostName } # staticSites: defaultHostname (same to PowerShell)
+    if ($app -and $parts[1] -eq 'host') { return Get-AppHost $app }
     if ($app -and $parts[1] -eq 'id') { return $app.id }
     return $null
 }
@@ -610,7 +698,9 @@ function Format-Text([string]$Text, [hashtable]$Values) {
 # --- cost --------------------------------------------------------------------------------------------
 
 # Azure list prices (prices.azure.com, public). Without it: the West Europe prices in EUR of 2026-10-17.
-$fallbackPrices = @{ B1 = 11.53; B2 = 23.14; P0v3 = 57.16; P1v3 = 114.32; StaticStandard = 7.92; LogsPerGb = 2.63; LogsFreeGb = 5 }
+$fallbackPrices = @{ B1 = 11.53; B2 = 23.14; P0v3 = 57.16; P1v3 = 114.32; StaticStandard = 7.92; LogsPerGb = 2.63; LogsFreeGb = 5
+    # Container registry a month (the catalog's prices, EUR 2026-11-19); Container Apps Consumption per second.
+    RegistryBasic = 4.30; RegistryStandard = 17.20; RegistryPremium = 43.00; ContainerVcpuSecond = 0.0000216; ContainerGibSecond = 0.0000027 }
 $script:pricesLive = $true
 function Get-RetailItems([string]$Filter) {
     $url = "https://prices.azure.com/api/retail/prices?currencyCode=$Currency&`$filter=" + [uri]::EscapeDataString($Filter)
@@ -640,6 +730,47 @@ function Get-LogsPrice([string]$Region) {
     $script:pricesLive = $false
     return [pscustomobject]@{ PerGb = $fallbackPrices.LogsPerGb; FreeGb = $fallbackPrices.LogsFreeGb }
 }
+# A container registry's monthly price by its SKU (Basic, Standard, Premium): a daily unit price.
+function Get-RegistryMonthly([string]$Sku, [string]$Region) {
+    if (@('Basic', 'Standard', 'Premium') -notcontains $Sku) { $Sku = 'Basic' }
+    $hit = Get-RetailItems "serviceName eq 'Container Registry' and armRegionName eq '$Region' and priceType eq 'Consumption' and meterName eq '$Sku Registry Unit'" |
+        Where-Object { $_.unitOfMeasure -eq '1/Day' -and [double]$_.retailPrice -gt 0 } | Select-Object -First 1
+    if ($hit) { return [double]$hit.retailPrice * 730 / 24 }
+    $script:pricesLive = $false
+    return [double]$fallbackPrices["Registry$Sku"]
+}
+# Container Apps Consumption: the active price of a vCPU second and a GiB second (the idle price is lower).
+function Get-ContainerAppsPrices([string]$Region) {
+    $items = @(Get-RetailItems "serviceName eq 'Azure Container Apps' and armRegionName eq '$Region' and priceType eq 'Consumption' and skuName eq 'Standard'")
+    $cpu = $items | Where-Object { $_.meterName -eq 'Standard vCPU Active Usage' -and [double]$_.retailPrice -gt 0 } | Select-Object -First 1
+    $mem = $items | Where-Object { $_.meterName -eq 'Standard Memory Active Usage' -and [double]$_.retailPrice -gt 0 } | Select-Object -First 1
+    if ($cpu -and $mem) { return [pscustomobject]@{ VcpuSecond = [double]$cpu.retailPrice; GibSecond = [double]$mem.retailPrice } }
+    $script:pricesLive = $false
+    return [pscustomobject]@{ VcpuSecond = $fallbackPrices.ContainerVcpuSecond; GibSecond = $fallbackPrices.ContainerGibSecond }
+}
+# The cost row of a Container Apps resource without a "cost" in the map (the kit's own rule for these kinds).
+function Get-ContainerCost($Def) {
+    switch ([string]$Def.armType) {
+        $registryType { return [pscustomobject]@{ kind = 'containerRegistry'; order = 3; label = 'Container registry {name} ({size})' } }
+        $containerEnvType { return [pscustomobject]@{ kind = 'containerAppsEnvironment'; order = 2; label = 'Container Apps environment {name} (Consumption)' } }
+        $containerAppType { return [pscustomobject]@{ kind = 'containerApp'; order = 2; label = 'Container app {name}' } }
+    }
+    return $null
+}
+# A container app's monthly cost at the Consumption active price: what its minimum replicas cost when they run all
+# month (an upper bound: idle replicas cost less, the subscription's monthly free grant comes first). $null when it
+# scales to zero (then it costs only what it runs).
+function Get-ContainerAppMonthly($Def, [string]$Region) {
+    $min = 0
+    if ($null -ne $Def.minReplicas) { [void][int]::TryParse([string]$Def.minReplicas, [ref]$min) }
+    if ($min -lt 1) { return $null }
+    $cpu = 0.5
+    $mem = 1.0
+    if ($Def.cpu) { [void][double]::TryParse(([string]$Def.cpu), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cpu) }
+    if ($Def.memory) { [void][double]::TryParse(([string]$Def.memory -replace '[^0-9.]', ''), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$mem) }
+    $p = Get-ContainerAppsPrices $Region
+    return $min * ($cpu * $p.VcpuSecond + $mem * $p.GibSecond) * 730 * 3600
+}
 # The estimate of one environment's answers: what it adds to the monthly bill at list prices, one row per
 # resource with a "cost" in the map. Shared resources from other groups add nothing (their own
 # environment pays for them).
@@ -647,14 +778,44 @@ function Write-CostEstimate([string]$Location, [string]$StaticLocation) {
     $rows = New-Object System.Collections.ArrayList
     function Row([string]$What, $Amount, [string]$Text) { [void]$rows.Add([pscustomobject]@{ What = $What; Amount = $Amount; Text = $Text }) }
     $pennies = '< ' + (0.1).ToString('0.00') # in the current culture, like the other amounts
-    foreach ($def in @($defs | Where-Object { $_.cost } | Sort-Object { [int]$_.cost.order })) {
+    # The Container Apps kinds have the kit's own rows when the map gives them none.
+    $costed = @($defs | ForEach-Object {
+            $c = $_.cost
+            if (-not $c) { $c = Get-ContainerCost $_ }
+            if ($c) { [pscustomobject]@{ Def = $_; Cost = $c } }
+        } | Sort-Object { [int]$_.Cost.order })
+    foreach ($item in $costed) {
+        $def = $item.Def
+        $cost = $item.Cost
         $r = $script:res[$def.key]
         if (-not $r -or -not $r.Name) { continue }
         $size = ''
         if ($def.size) { $size = [string]$script:choices[$def.size.answer] }
         $values = @{ name = $r.Name; size = $size; group = $r.Group }
-        $label = Format-Text $def.cost.label $values
-        $kind = [string]$def.cost.kind
+        $label = Format-Text $cost.label $values
+        $kind = [string]$cost.kind
+        if ($kind -eq 'containerRegistry') {
+            if (-not $size) { $size = 'Basic' }
+            $label = Format-Text $cost.label @{ name = $r.Name; size = $size; group = $r.Group }
+            if ($r.Group) { Row "$label (shared from $($r.Group))" 0.0 '' }
+            else { Row $label (Get-RegistryMonthly $size $Location) '' }
+            continue
+        }
+        if ($kind -eq 'containerAppsEnvironment') {
+            if ($r.Group) { Row "$label (shared from $($r.Group))" 0.0 ''; continue }
+            Row $label $null 'per use: vCPU and memory seconds and requests of its apps, after the subscription''s monthly free grant (180,000 vCPU-s, 360,000 GiB-s, 2 million requests); 0.00 while they scale to zero'
+            continue
+        }
+        if ($kind -eq 'containerApp') {
+            $monthly = Get-ContainerAppMonthly $def $Location
+            if ($null -eq $monthly) { Row $label $null 'per use (scales to zero)' }
+            else {
+                $cpuText = '0.5'; if ($def.cpu) { $cpuText = [string]$def.cpu }
+                $memText = '1Gi'; if ($def.memory) { $memText = [string]$def.memory }
+                Row "$label ($($def.minReplicas) always-on replica(s) at $cpuText vCPU / $memText, at most; less when idle)" $monthly ''
+            }
+            continue
+        }
         if ($kind -eq 'appServicePlan') {
             if ($r.Group) { Row (Format-Text $def.cost.sharedLabel $values) 0.0 '' }
             else { Row $label (Get-PlanMonthly $size $Location) '' }
@@ -739,6 +900,14 @@ function Get-RuleName([string]$Type, [string]$Target) {
     if (@($naming.noHyphens) -contains $Type) { $n = $n.Replace('-', '') }
     return $n
 }
+# An app's own identity is named after its app (naming.json "identityPattern"; {apptype}: the app's naming
+# type): contoso-shop-apiapp-ident-prod, contoso-shop-api2-apiapp-ident-prod, so two apps without a sub
+# application name never get the same one. $Target: the app's deployment target (its sub application name).
+function Get-IdentityRuleName([string]$Type, [string]$Target, [string]$AppType) {
+    $pattern = [string]$naming.identityPattern
+    if (-not $pattern) { $pattern = '{prefix}-{sub}-{apptype}-ident-{env}' } # a naming.json from before 0.2.0
+    return Fill $pattern.Replace('{apptype}', $AppType) $Type (Get-Sub $Target)
+}
 # Saved names are the defaults while the prefix (and the target's sub application name) stay the same;
 # a new one starts from the rules again.
 function Get-Default([string]$Key, [string]$Rule, [string]$Target) {
@@ -752,7 +921,39 @@ function Test-Name([string]$Type, [string]$Name) {
     if ($Name.Length -gt $max) { return "$Name is $($Name.Length) characters, at most $max" }
     if ($Type -eq 'store' -and $Name -notmatch '^[a-z0-9]{3,24}$') { return "${Name}: 3-24 lowercase letters and digits only" }
     if ($Type -eq 'kv' -and $Name -notmatch '^[a-z][a-z0-9-]{1,22}[a-z0-9]$') { return "${Name}: 3-24 letters, digits and hyphens, starting with a letter" }
+    # Container Apps (checked here, before Azure is asked): an app 2-32, an environment 2-60 lowercase letters, digits
+    # and single hyphens, starting with a letter; a registry 5-50 letters and digits.
+    if ($Type -eq 'contapp' -and ($Name -cnotmatch '^[a-z][a-z0-9-]{0,30}[a-z0-9]$' -or $Name.Contains('--'))) { return "${Name}: 2-32 lowercase letters, digits and single hyphens, starting with a letter" }
+    if ($Type -eq 'contenv' -and ($Name -cnotmatch '^[a-z][a-z0-9-]{0,58}[a-z0-9]$' -or $Name.Contains('--'))) { return "${Name}: 2-60 lowercase letters, digits and single hyphens, starting with a letter" }
+    if ($Type -eq 'contreg' -and $Name -cnotmatch '^[a-z0-9]{5,50}$') { return "${Name}: 5-50 lowercase letters and digits only" }
     if ($Type -ne 'store' -and $Name -cnotmatch '^[a-z0-9][a-z0-9-]*[a-z0-9]$') { return "${Name}: lowercase letters, digits and hyphens" }
+}
+# The names an environment's saved answers hold (infra/environments/<env>.json), checked by their naming rule as a
+# typed name is (letter case aside: Azure's names ignore it), and the resource groups of shared resources by
+# Azure's rule for a group (letters, digits . _ - ( ), at most 90, not ending in '.'): a name edited into the file
+# would otherwise reach az unchecked. The problems, empty when there are none.
+function Get-SavedNameProblems($Saved) {
+    $out = @()
+    if (-not $Saved) { return $out }
+    if ($Saved.names) {
+        foreach ($p in @($Saved.names.PSObject.Properties)) {
+            $def = Get-Def $p.Name
+            if (-not $def) { continue } # not in the map (any more): never used
+            $problem = Test-Name ([string]$def.type) (([string]$p.Value).ToLowerInvariant())
+            if ($problem) { $out += "names.$($p.Name): $problem" }
+        }
+    }
+    if ($Saved.groups) {
+        foreach ($p in @($Saved.groups.PSObject.Properties)) {
+            $g = [string]$p.Value
+            if ($g -and ($g -cnotmatch '^[A-Za-z0-9._()-]{1,90}$' -or $g.EndsWith('.'))) { $out += "groups.$($p.Name): $g is no resource group name" }
+        }
+    }
+    return $out
+}
+function Assert-SavedNames($Saved, [string]$File) {
+    $problems = @(Get-SavedNameProblems $Saved)
+    if ($problems.Count) { throw "$File holds names that break the naming rules (fix them there, or run a start of a fresh environment): $($problems -join '; ')" }
 }
 function Read-Name([string]$Label, [string]$Type, [string]$Default) {
     while ($true) {
@@ -785,8 +986,15 @@ function Test-Ours($Resource) { return ($Resource.tags -and $Resource.tags.'mana
 
 # The map's name checks ("free": a new name; "check": an existing resource). A problem, or nothing.
 function Test-Free($Def, [string]$Name) {
+    # A user-assigned identity's name is unique per resource group only (Select-Own checks the group).
+    if ($Def.armType -eq $identityType) { return }
     switch ([string]$Def.free) {
         'nameAvailable' { return Test-NameFree $Def.armType.Split('/')[0] $Def.armType $Name $Def.apiVersion }
+        # A container registry's name is global (<name>.azurecr.io).
+        'registryName' {
+            $r = Invoke-Az @('acr', 'check-name', '--name', $Name)
+            if (-not $r.nameAvailable) { return "$Name is taken: $($r.message)" }
+        }
         'vaultSoftDelete' {
             # A deleted vault keeps its name for 30 days (soft delete).
             $deleted = Try-Az @('keyvault', 'show-deleted', '--name', $Name)
@@ -890,7 +1098,12 @@ function Test-When($Def) {
 function Read-Resource($Def) {
     $script:currentDef = $Def
     $target = [string]$Def.target
-    if ($target -and -not $script:subs.Contains($target)) { Read-Sub $target $Def.targetLabel $Def.type }
+    # An app's own identity has its app's deployment target: the sub application name is the app's question.
+    $owner = $null
+    if ($Def.owner) { $owner = Get-Def ([string]$Def.owner) }
+    if ($target -and -not $script:subs.Contains($target)) {
+        if ($owner) { Read-Sub $target $owner.targetLabel $owner.type } else { Read-Sub $target $Def.targetLabel $Def.type }
+    }
     $saved = $script:saved
     if ($Def.choice) {
         $default = [string]$Def.choice.default
@@ -904,6 +1117,7 @@ function Read-Resource($Def) {
     $pattern = [string](Get-Field $Def 'pattern')
     $for = [string](Get-Field $Def 'for')
     if ($pattern) { $rule = Fill $naming.$pattern $for (Get-Sub $for) } else { $rule = Get-RuleName $Def.type $target }
+    if ($owner -and -not $pattern) { $rule = Get-IdentityRuleName $Def.type $target ([string]$owner.type) }
     # A name the same in every environment (a blob container's, an Event Grid subscription's).
     if ($Def.nameDefault) { $rule = [string]$Def.nameDefault }
     $nameTarget = $target
@@ -997,6 +1211,864 @@ function Test-Child($Def, [string]$Name) {
     return [bool](Try-Az @('sql', 'db', 'show', '-g', $group, '-s', $server.Name, '-n', $Name))
 }
 
+# --- the apps' identities ----------------------------------------------------------------------------
+
+# Every app signs in as its own user-assigned identity (the map's "identity": a resource of kind appIdentity
+# with the app as its "owner"; infra/LAZYBICEP.md, "Identity"). An app entry without one (a map from before
+# 0.2.0) still has its system-assigned identity. Role assignments, database users and removal go through it.
+
+# An identity of the map as Azure has it (clientId, principalId, id), or $null while it doesn't exist. Only a
+# found one is kept for the run (the template creates it during the run).
+$script:identities = @{}
+function Get-IdentityOf([string]$Key) {
+    if ($script:identities.ContainsKey($Key)) { return $script:identities[$Key] }
+    $r = $script:res[$Key]
+    if (-not $r -or -not $r.Name -or -not $script:rgName) { return $null }
+    $ident = Try-Az @('identity', 'show', '-g', $script:rgName, '-n', $r.Name)
+    if ($ident -and $ident.principalId) { $script:identities[$Key] = $ident }
+    return $ident
+}
+# The identity an app signs in with: Name, Id, PrincipalId, ClientId (empty for a system-assigned identity: its
+# service principal's appId, read when needed) and System. $null while there is none. $IdentityName: the
+# app's own identity (in $Group, the environment's); $App: the app as Azure shows it, for an entry without one.
+function Get-AppIdentity($Def, [string]$Group, [string]$IdentityName, $App) {
+    if ($Def.identity) {
+        if (-not $IdentityName -or -not $Group) { return $null }
+        $ident = Try-Az @('identity', 'show', '-g', $Group, '-n', $IdentityName)
+        if (-not ($ident -and $ident.principalId)) { return $null }
+        return [pscustomobject]@{ Name = [string]$ident.name; Id = [string]$ident.id; PrincipalId = [string]$ident.principalId; ClientId = [string]$ident.clientId; System = $false }
+    }
+    if (-not ($App -and $App.identity -and $App.identity.principalId)) { return $null }
+    return [pscustomobject]@{ Name = [string]$App.name; Id = ''; PrincipalId = [string]$App.identity.principalId; ClientId = ''; System = $true }
+}
+# The same during a run (the answers and the apps as this run found them).
+function Get-RunIdentity([string]$AppKey) {
+    $def = Get-Def $AppKey
+    if (-not $def) { return $null }
+    if ($def.identity) {
+        $ident = Get-IdentityOf ([string]$def.identity)
+        if (-not $ident) { return $null }
+        return [pscustomobject]@{ Name = [string]$ident.name; Id = [string]$ident.id; PrincipalId = [string]$ident.principalId; ClientId = [string]$ident.clientId; System = $false }
+    }
+    return Get-AppIdentity $def $script:rgName '' $script:apps[$AppKey]
+}
+# An app's settings as main.bicep writes them: the map's, and for a function app with its own identity the
+# <Name>__credential / <Name>__clientId that follow each identity-based connection (<Name>__fullyQualifiedNamespace,
+# __serviceUri, __accountName... to a resource of the map: the Functions host's triggers and bindings) unless the map
+# sets them; the same rule as infra/generate.ps1 (Get-Settings). Other apps get AZURE_CLIENT_ID only. Other settings
+# an app has are never flagged.
+$identityConnections = @('accountName', 'fullyQualifiedNamespace', 'serviceUri', 'blobServiceUri', 'queueServiceUri', 'tableServiceUri', 'endpoint', 'uri')
+function Get-ExpectedSettings($Def) {
+    $settings = @($Def.appSettings | Where-Object { $_ })
+    if (-not $Def.identity -or $Def.kind -ne 'functionApp') { return $settings }
+    $have = @($settings | ForEach-Object { [string]$_.name })
+    $out = @()
+    foreach ($s in $settings) {
+        $out += $s
+        $name = [string]$s.name
+        $at = $name.LastIndexOf('__')
+        if ($at -lt 1 -or $name -like 'ConnectionStrings__*' -or $identityConnections -notcontains $name.Substring($at + 2)) { continue }
+        if (-not @([regex]::Matches([string]$s.value, '[{|](\w+)\.') | Where-Object { Get-Def $_.Groups[1].Value }).Count) { continue }
+        $prefix = $name.Substring(0, $at)
+        foreach ($p in @(@('credential', 'managedidentity'), @('clientId', "{$($Def.identity).clientId}"))) {
+            $n = "${prefix}__$($p[0])"
+            if ($have -contains $n) { continue }
+            $have += $n
+            $out += [pscustomobject]@{ name = $n; value = $p[1] }
+        }
+    }
+    return $out
+}
+# Role assignments of an identity, wherever they are (a vault shared from another group too).
+function Get-RoleAssignments([string]$PrincipalId) {
+    return @(Try-Az @('role', 'assignment', 'list', '--assignee', $PrincipalId, '--all') | Where-Object { $_ })
+}
+
+# The two ways an app's identity can be misused, reported only (nothing is changed): an identity in the
+# environment's group that no app of the map owns (its app deleted outside the setup, or made by hand: it keeps
+# its roles), and a role at an app identity's own scope that lets someone attach it to another resource
+# (Microsoft.ManagedIdentity/userAssignedIdentities/assign/action). Roles inherited from the group or the
+# subscription are the administrators' and not reported.
+$borrowRoles = @('Managed Identity Operator', 'Managed Identity Contributor', 'Contributor', 'Owner', 'User Access Administrator')
+function Test-AppIdentities {
+    $owned = @{}
+    foreach ($d in @($defs | Where-Object { $_.owner -and $_.armType -eq $identityType })) {
+        $n = [string]$script:res[$d.key].Name
+        if ($n) { $owned[$n.ToLower()] = $d }
+    }
+    foreach ($ident in @(Try-Az @('identity', 'list', '-g', $script:rgName) | Where-Object { $_ })) {
+        $d = $owned[([string]$ident.name).ToLower()]
+        if (-not $d) {
+            $made = 'not made by this template'
+            if ($ident.tags -and $ident.tags.'managed-by' -eq $managedBy) { $made = 'made by this template' }
+            Missing "identity $($ident.name) in $($script:rgName) ($made): no app of the map owns it; it keeps its roles (remove it once nothing uses it: az identity delete --ids $($ident.id))"
+            continue
+        }
+        $risky = @(Try-Az @('role', 'assignment', 'list', '--scope', $ident.id) | Where-Object { $_ -and ([string]$_.scope) -ieq [string]$ident.id -and $borrowRoles -contains [string]$_.roleDefinitionName })
+        foreach ($a in $risky) {
+            $who = [string]$a.principalName
+            if (-not $who) { $who = [string]$a.principalId }
+            Missing "identity $($ident.name) of $($d.owner): $($a.roleDefinitionName) for $who ($($a.principalType)) on it lets them attach it to other resources (az role assignment delete --ids $($a.id))"
+        }
+        if (-not $risky.Count) { Ok "identity $($ident.name) of $($d.owner): no role at its own scope to attach it elsewhere" }
+    }
+}
+
+# --- container apps: image, secrets, sign-in ----------------------------------------------------------------
+
+# The container apps of the map that run in an environment or pull from a registry (their "environment" /
+# "registry", or a connection to it).
+function Get-ContainerAppsUsing([string]$Key) {
+    $out = @()
+    foreach ($a in @($defs | Where-Object { $_.armType -eq $containerAppType })) {
+        $linked = @($map.connections | Where-Object { $_ -and $_.from -eq $a.key -and @(([string]$_.to).Split('|')) -contains $Key }).Count
+        if ([string]$a.environment -eq $Key -or [string]$a.registry -eq $Key -or $linked) { $out += [string]$a.key }
+    }
+    return $out
+}
+# main.bicep's image of a container app (<key>Image): the image Azure runs now, '' for the placeholder (a new app, or
+# one still on it). Unknown ($null) when the app exists but its image can't be read: then the template is not deployed
+# (it would put the placeholder back).
+function Get-ImageParam([string]$Key) {
+    $r = $script:res[$Key]
+    if (-not ($r -and $r.Found)) { return '' }
+    $image = Get-AppImage $script:apps[$Key]
+    if (-not $image) { return $null }
+    if (Test-PlaceholderImage $image) { return '' }
+    return $image
+}
+# The newest image a container app's workflow pushed to its registry (repository: the app's key in lowercase words,
+# adminApi -> admin-api, tagged with the commit), as <login server>/<repository>:<tag>; '' when there is none.
+function Get-PushedImage($Def, [string]$Tag) {
+    $regKey = [string]$Def.registry
+    if (-not $regKey) { $regKey = [string](@($map.connections | Where-Object { $_.from -eq $Def.key -and (Get-Def $_.to).armType -eq $registryType } | ForEach-Object { $_.to }) | Select-Object -First 1) }
+    $reg = $script:res[$regKey]
+    if (-not ($reg -and $reg.Name -and $reg.Found)) { return '' }
+    $repo = ([string]$Def.key -creplace '([a-z0-9])([A-Z])', '$1-$2').ToLowerInvariant()
+    $tags = @(Try-Az @('acr', 'repository', 'show-tags', '--name', $reg.Name, '--repository', $repo, '--orderby', 'time_desc', '--top', '10') | Where-Object { $_ })
+    if (-not $tags.Count) { return '' }
+    # A given tag (the commit a run built) only when it is there; else the newest.
+    $pick = [string]$tags[0]
+    if ($Tag) { if ($tags -contains $Tag) { $pick = $Tag } else { return '' } }
+    $server = [string](Try-Az @('acr', 'show', '--name', $reg.Name, '--query', 'loginServer'))
+    if (-not $server) { $server = "$($reg.Name).azurecr.io" }
+    return "$server/${repo}:$pick"
+}
+# Whether the sign-in in front of a container app is on in Azure with this client id (its first image waits for it).
+function Test-SignInReady($Def, [string]$ClientId) {
+    if (-not $ClientId) { return $false }
+    $auth = Try-Az @('containerapp', 'auth', 'show', '-g', $script:rgName, '-n', [string]$script:res[$Def.key].Name)
+    $cfg = $auth
+    if ($auth -and $auth.properties) { $cfg = $auth.properties }
+    if (-not ($cfg -and $cfg.platform -and $cfg.platform.enabled -eq $true -and $cfg.identityProviders -and $cfg.identityProviders.azureActiveDirectory)) { return $false }
+    $aad = $cfg.identityProviders.azureActiveDirectory
+    return [bool]($aad.enabled -ne $false -and $aad.registration -and [string]$aad.registration.clientId -eq $ClientId)
+}
+# The Key Vault secrets a container app's settings read (@Microsoft.KeyVault(VaultName=...;SecretName=...)) that are
+# not in their vault yet, as @{ Vault; Secret; Ref } (names only). Its first image waits for them: a revision with a
+# missing Key Vault secret doesn't start. ({secret.<name>}: the setup keeps it, main.bicep writes it.)
+function Get-MissingMapSecrets($Def) {
+    $out = @()
+    foreach ($s in @($Def.appSettings | Where-Object { $_ })) {
+        $v = [string]$s.value
+        if ($v -notmatch 'SecretName=([^;)\s]+)') { continue }
+        $secret = $Matches[1]
+        if (-not (Test-SecretName $secret)) { Missing "$($Def.key): its setting $($s.name) names the Key Vault secret $secret (letters, digits and - only): not checked"; continue }
+        $vault = ''
+        if ($v -match 'VaultName=\{(\w+)\.name\}') { if ($script:res[$Matches[1]]) { $vault = [string]$script:res[$Matches[1]].Name } }
+        elseif ($v -match 'VaultName=([^;)\s{}]+)') { $vault = $Matches[1] }
+        if (-not $vault) { continue }
+        $id = Get-VaultId $vault
+        if (-not $id) { continue }
+        if (-not (Try-Az @('resource', 'show', '--ids', "$id/secrets/$secret"))) { $out += [pscustomobject]@{ Vault = $vault; Secret = $secret; Ref = [string]$s.name } }
+    }
+    return $out
+}
+# The command that makes an app read its Key Vault secrets again: a container app's revision restarted (a versionless
+# Key Vault reference also restarts it by itself within about 30 minutes of a new version), an App Service restarted.
+function Get-RestartCommand([string]$Key) {
+    $d = Get-Def $Key
+    $n = [string]$script:res[$Key].Name
+    $g = $script:rgName
+    if ($d.armType -eq $containerAppType) {
+        $rev = "(az containerapp show -g $g -n $n --query properties.latestRevisionName -o tsv)"
+        $app = $script:apps[$Key]
+        if ($app -and $app.properties -and $app.properties.latestRevisionName) { $rev = [string]$app.properties.latestRevisionName }
+        return "az containerapp revision restart -g $g -n $n --revision $rev"
+    }
+    if ($d.kind -eq 'functionApp') { return "az functionapp restart -g $g -n $n" }
+    return "az webapp restart -g $g -n $n"
+}
+# A vault's resource id by its name: one of the map's, else looked up (management plane only, never a secret value).
+function Get-VaultId([string]$Vault) {
+    foreach ($d in @($defs | Where-Object { $_.armType -eq 'Microsoft.KeyVault/vaults' })) {
+        $r = $script:res[$d.key]
+        if (-not ($r -and $r.Name -ieq $Vault)) { continue }
+        if ($r.Found) { return [string]$r.Found.id }
+        $g = $r.Group
+        if (-not $g) { $g = $script:rgName }
+        return "/subscriptions/$($script:subscription)/resourceGroups/$g/providers/Microsoft.KeyVault/vaults/$($r.Name)"
+    }
+    return [string](Try-Az @('keyvault', 'show', '--name', $Vault, '--query', 'id'))
+}
+# The Key Vault secrets a container app references (its secrets with a keyVaultUrl): each must exist, or the app's
+# revision can't start. Checked as resources (names only); the values are never read. The missing ones, as
+# @{ Vault; Secret; Ref } for the next steps.
+function Test-ContainerAppSecrets([string]$Key) {
+    $app = $script:apps[$Key]
+    if (-not ($app -and $app.properties -and $app.properties.configuration)) { return @() }
+    $name = [string]$script:res[$Key].Name
+    $lacking = @()
+    foreach ($s in @($app.properties.configuration.secrets | Where-Object { $_ -and $_.keyVaultUrl })) {
+        if ([string]$s.keyVaultUrl -notmatch '^https://([^./]+)\.vault\.[^/]+/secrets/([^/?]+)') { continue }
+        $vault = $Matches[1]
+        $secretName = $Matches[2]
+        if (-not (Test-SecretName $secretName)) { Missing "${name}: its secret $($s.name) names the Key Vault secret $secretName (letters, digits and - only): not checked"; continue }
+        $vaultId = Get-VaultId $vault
+        if (-not $vaultId) { Missing "${name}: the Key Vault $vault of its secret $($s.name) is not found"; continue }
+        if (Try-Az @('resource', 'show', '--ids', "$vaultId/secrets/$secretName")) { Ok "${name}: Key Vault secret $secretName ($vault)" }
+        else {
+            Missing "${name}: Key Vault secret $secretName in $vault is missing (its revision can't start without it; the next steps say how)"
+            $lacking += [pscustomobject]@{ Vault = $vault; Secret = $secretName; Ref = [string]$s.name }
+        }
+    }
+    return $lacking
+}
+
+# Sign-in in front of a container app (the map's "signIn"; docs/architecture/container-apps.md): Container Apps'
+# built-in sign-in with Microsoft Entra ID (main.bicep's authConfigs, made once <key>SignInClientId is known) and its
+# app registration per environment, made by the step "Sign-in app registrations": named after the app, single tenant,
+# redirect https://<fqdn>/.auth/login/aad/callback, ID tokens (no client secret: the platform signs users in with the
+# ID token), optional identifier URI api://<client id> and app roles, Assignment required with the group asked per
+# environment. The client id and the group are saved with the environment's answers.
+# On with "signIn": { "provider": "entra" } or "signIn": "entra"; off without it or with provider none (infra/generate.ps1, the same rule).
+function Test-SignInOn($Def) {
+    if (-not ($Def -and $Def.signIn)) { return $false }
+    $provider = [string]$Def.signIn
+    if ($Def.signIn -isnot [string]) { $provider = [string]$Def.signIn.provider }
+    return [bool]($provider -and $provider -ne 'none')
+}
+function Get-SignInDefs { return @($defs | Where-Object { $_.armType -eq $containerAppType -and (Test-SignInOn $_) }) }
+function Get-SignInClientIdAnswer([string]$Key) { return "${Key}SignInClientId" }
+function Get-SignInGroupAnswer([string]$Key) { return "${Key}SignInGroup" }
+function Test-Yes($Value) {
+    if ($Value -is [bool]) { return $Value }
+    return @('true', 'yes', 'y', '1') -contains ([string]$Value).ToLower()
+}
+function Get-SignInObjectIdAnswer([string]$Key) { return "${Key}SignInObjectId" }
+# GitHub Actions' app registration's client id in the environment's answers (<deploy key>ClientId).
+function Get-DeployClientIdAnswer([string]$Key) { return "${Key}ClientId" }
+
+# --- input checked before it goes to az / gh ---------------------------------------------------------------
+function Test-Guid([string]$Value) { return [bool]($Value -match '^[0-9a-fA-F-]{36}$') }
+function Test-SecretName([string]$Value) { return [bool]($Value -cmatch '^[0-9A-Za-z-]{1,127}$') }
+# A redirect or identifier URI the setup writes into an app registration.
+function Test-SafeUri([string]$Value) { return [bool]($Value -cmatch '^(https://[A-Za-z0-9.-]+(:\d+)?(/[A-Za-z0-9._~/-]*)?|api://[0-9a-fA-F-]{36})$') }
+
+# --- Entra objects: by their id when one is known, by display name only when owned by you alone ---------------
+# A display name is no proof of ownership: anyone who may create app registrations can make one with the name the
+# setup would look for. So an app registration is used by the id the environment saved (or the one Azure runs with);
+# by its name only when no id is known, exactly one has the name and its owners are you alone (the allow-list:
+# just the signed-in operator for now).
+function Get-OperatorId {
+    if ($null -eq $script:operatorId) { $script:operatorId = [string](Try-Az @('ad', 'signed-in-user', 'show', '--query', 'id')) }
+    return $script:operatorId
+}
+function Get-AllowedOwners { return @(@(Get-OperatorId) | Where-Object { $_ }) }
+# The owners of an app registration ('app') or service principal ('sp') as @{ Id; Name }: an empty list when it has
+# none, $null when they can't be read.
+function Get-EntraOwners([string]$Kind, [string]$Id) {
+    try { $list = Invoke-Az @('ad', $Kind, 'owner', 'list', '--id', $Id) } catch { return $null }
+    return , @($list | Where-Object { $_ } | ForEach-Object {
+            $n = [string]$_.userPrincipalName
+            if (-not $n) { $n = [string]$_.displayName }
+            [pscustomobject]@{ Id = [string]$_.id; Name = $n }
+        })
+}
+# You as an owner of a service principal (az has no command for it: Microsoft Graph, the body from a file).
+function Add-SpOwner([string]$SpId, [string]$OwnerId) {
+    if (-not ((Test-Guid $SpId) -and (Test-Guid $OwnerId))) { throw "not an object id: $SpId / $OwnerId" }
+    $body = Write-TempJson 'owner.json' @{ '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$OwnerId" }
+    Invoke-Az @('rest', '--method', 'post', '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$SpId/owners/`$ref", '--headers', 'Content-Type=application/json', '--body', "@$body") | Out-Null
+}
+function Test-OwnedByOperator($Owners) {
+    $op = Get-OperatorId
+    if ($null -eq $Owners -or -not $op) { return $false }
+    $ids = @($Owners | ForEach-Object { $_.Id })
+    $allowed = @(Get-AllowedOwners)
+    return [bool]($ids -contains $op -and -not @($ids | Where-Object { $allowed -notcontains $_ }).Count)
+}
+function Get-OwnersText($Owners) {
+    if ($null -eq $Owners) { return 'unreadable' }
+    if (-not @($Owners).Count) { return 'none' }
+    return (@($Owners | ForEach-Object { if ($_.Name) { $_.Name } else { $_.Id } }) -join ', ')
+}
+# The app registrations named exactly so.
+function Find-SignInRegistration([string]$DisplayName) {
+    return @(Try-Az @('ad', 'app', 'list', '--display-name', $DisplayName) | Where-Object { $_ -and [string]$_.displayName -ceq $DisplayName })
+}
+# The credentials on an app registration that the setup didn't make: client secrets, certificates, and federated
+# credentials other than GitHub Actions' with a subject in $Subjects (the sign-in app has none of its own).
+# @{ Kind 'secret' / 'certificate' / 'federated'; Text } each, empty when there are none; $null when its federated
+# credentials can't be read.
+function Get-ForeignCredentials($Reg, [string[]]$Subjects) {
+    $githubIssuer = 'https://token.actions.githubusercontent.com'
+    $appId = [string]$Reg.appId
+    $out = @()
+    foreach ($c in @($Reg.passwordCredentials | Where-Object { $_ })) { $out += [pscustomobject]@{ Kind = 'secret'; Text = "client secret $($c.displayName) ($($c.keyId)): az ad app credential delete --id $appId --key-id $($c.keyId)" } }
+    foreach ($c in @($Reg.keyCredentials | Where-Object { $_ })) { $out += [pscustomobject]@{ Kind = 'certificate'; Text = "certificate $($c.displayName) ($($c.keyId)): az ad app credential delete --id $appId --key-id $($c.keyId) --cert" } }
+    try { $fics = @(Invoke-Az @('ad', 'app', 'federated-credential', 'list', '--id', $appId) | Where-Object { $_ }) } catch { return $null }
+    foreach ($c in @($fics | Where-Object { -not ([string]$_.issuer -ceq $githubIssuer -and @($Subjects) -ccontains [string]$_.subject) })) {
+        $out += [pscustomobject]@{ Kind = 'federated'; Text = "federated credential $($c.name) trusting $($c.issuer) $($c.subject): az ad app federated-credential delete --id $appId --federated-credential-id $($c.id)" }
+    }
+    return , $out
+}
+# Why an app registration found only by its display name is not taken over ('' when it may be): whoever made it can
+# have put a way in before handing it to you - a client secret, a certificate, a federated credential, (sign-in app)
+# a redirect other than the app's callback ($Redirect; '' while unknown: none at all), or a service principal that
+# others own (they can add credentials to it). Unreadable counts as not clean. @{ Problem; App (as Entra has it) }.
+function Get-AdoptionProblem([string]$AppId, [string]$Redirect, [switch]$SignIn) {
+    if (-not (Test-Guid $AppId)) { return [pscustomobject]@{ Problem = "$AppId is no client id"; App = $null } }
+    $full = Try-Az @('ad', 'app', 'show', '--id', $AppId)
+    if (-not $full) { return [pscustomobject]@{ Problem = 'it is not readable'; App = $null } }
+    $p = @()
+    if (@($full.passwordCredentials | Where-Object { $_ }).Count) { $p += 'it has a client secret' }
+    if (@($full.keyCredentials | Where-Object { $_ }).Count) { $p += 'it has a certificate' }
+    try { $fics = @(Invoke-Az @('ad', 'app', 'federated-credential', 'list', '--id', $AppId) | Where-Object { $_ }) } catch { $fics = $null }
+    if ($null -eq $fics) { $p += 'its federated credentials are not readable' }
+    elseif ($fics.Count) { $p += "it trusts $((@($fics | ForEach-Object { [string]$_.subject })) -join ', ') (federated credentials)" }
+    if ($SignIn) {
+        $web = @()
+        if ($full.web) { $web = @($full.web.redirectUris | Where-Object { $_ }) }
+        $more = @()
+        if ($full.spa) { $more += @($full.spa.redirectUris | Where-Object { $_ }) }
+        if ($full.publicClient) { $more += @($full.publicClient.redirectUris | Where-Object { $_ }) }
+        $webOk = (-not $web.Count) -or ($web.Count -eq 1 -and $Redirect -and [string]$web[0] -ceq $Redirect)
+        if ($more.Count -or -not $webOk) { $p += "it redirects to $((@($web) + @($more)) -join ', ')$(if ($Redirect) { " (only $Redirect)" } else { ' (none while the app''s address is unknown)' })" }
+    }
+    try { $sps = @(Invoke-Az @('ad', 'sp', 'list', '--filter', "appId eq '$AppId'") | Where-Object { $_ }) } catch { $sps = $null }
+    if ($null -eq $sps) { $p += 'its service principal is not readable' }
+    foreach ($sp in @($sps | Where-Object { $_ })) {
+        $spOwners = Get-EntraOwners 'sp' ([string]$sp.id)
+        if (-not (Test-OwnedByOperator $spOwners)) { $p += "its service principal's owners are $(Get-OwnersText $spOwners), not you alone" }
+    }
+    return [pscustomobject]@{ Problem = ($p -join '; '); App = $full }
+}
+# The app registration to use for $DisplayName: the one with $ClientId when an id is known (one named so with
+# another id is only reported, never switched to); by its name only when no id is known, exactly one has the name,
+# you alone own it and it is clean (Get-AdoptionProblem; -SignIn with its $Redirect for a sign-in app).
+# @{ App (or $null); Source 'id' / 'name' / 'none'; Problem; Note }.
+function Resolve-EntraApp([string]$DisplayName, [string]$ClientId, [string]$Answer, [string]$Redirect = '', [switch]$SignIn) {
+    $out = [pscustomobject]@{ App = $null; Source = 'none'; Problem = ''; Note = '' }
+    if ($ClientId) {
+        if (-not (Test-Guid $ClientId)) { $out.Problem = "$Answer $ClientId is not a client id (fix it in the environment's answers)"; return $out }
+        $named = @(Find-SignInRegistration $DisplayName | Where-Object { [string]$_.appId -ne $ClientId })
+        if ($named.Count) { $out.Note = "also named ${DisplayName}: $((@($named | ForEach-Object { $_.appId })) -join ', ') (not used: the saved $Answer $ClientId is)" }
+        $app = Try-Az @('ad', 'app', 'show', '--id', $ClientId)
+        if (-not $app) { $out.Problem = "its app registration $ClientId ($Answer) is not found or not readable (deleted? Entra keeps a deleted one 30 days); nothing is created or adopted by name instead"; return $out }
+        $out.App = $app
+        $out.Source = 'id'
+        return $out
+    }
+    $regs = @(Find-SignInRegistration $DisplayName)
+    if (-not $regs.Count) { return $out }
+    if ($regs.Count -gt 1) { $out.Problem = "$($regs.Count) app registrations are named $DisplayName ($((@($regs | ForEach-Object { $_.appId })) -join ', ')): none is used by its name; put the right one's client id into the environment's answers as $Answer"; return $out }
+    $owners = Get-EntraOwners 'app' ([string]$regs[0].appId)
+    if (-not (Test-OwnedByOperator $owners)) {
+        $out.Problem = "the app registration $DisplayName ($($regs[0].appId)) is not taken over by its name: its owners are $(Get-OwnersText $owners), not you alone; if it is this environment's, put its client id into the environment's answers as $Answer"
+        return $out
+    }
+    $clean = Get-AdoptionProblem ([string]$regs[0].appId) $Redirect -SignIn:$SignIn
+    if ($clean.Problem) {
+        $out.Problem = "the app registration $DisplayName ($($regs[0].appId)) is not taken over by its name: $($clean.Problem); check it, then put its client id into the environment's answers as $Answer (or delete it)"
+        return $out
+    }
+    $out.App = $clean.App
+    $out.Source = 'name'
+    return $out
+}
+# The service principal of the app registration GitHub Actions deploys with, before any role or database user is
+# given to it. Whoever owns it can give it a credential and deploy as it, so (the gate of Set-SignInApp) one owned
+# by you alone is used; one without owners when you become its owner (asked); one with other owners never.
+# @{ Principal (or $null); Refused ($true: no role or database user for it) }.
+function Get-DeployPrincipal($Entra, [string]$DeployApp) {
+    $op = Get-OperatorId
+    $principal = Try-Az @('ad', 'sp', 'show', '--id', [string]$Entra.appId)
+    if ($principal) {
+        $spOwners = Get-EntraOwners 'sp' ([string]$principal.id)
+        if (Test-OwnedByOperator $spOwners) { Ok 'service principal (owned by you alone)'; return [pscustomobject]@{ Principal = $principal; Refused = $false } }
+        if ($null -ne $spOwners -and -not @($spOwners).Count -and $op) {
+            $spId = [string]$principal.id
+            if (Invoke-Fix "${DeployApp}: its service principal has no owner (no role is given to it until you are)" "Make you the owner of the service principal of $DeployApp?" { Add-SpOwner $spId $op } "${DeployApp}: service principal owned by you") { return [pscustomobject]@{ Principal = $principal; Refused = $false } }
+            return [pscustomobject]@{ Principal = $null; Refused = $true }
+        }
+        Missing "${DeployApp}: its service principal has the owners $(Get-OwnersText $spOwners), not you alone: no role or database user is given to it (remove the others in Enterprise applications -> $DeployApp -> Owners)"
+        return [pscustomobject]@{ Principal = $null; Refused = $true }
+    }
+    if (-not $op) { Missing "${DeployApp}: service principal (made only by a signed-in user, its owner)"; return [pscustomobject]@{ Principal = $null; Refused = $true } }
+    if (Confirm-Step 'Create its service principal (you its owner)?') {
+        $principal = Invoke-Az @('ad', 'sp', 'create', '--id', [string]$Entra.appId)
+        if (-not (Test-OwnedByOperator (Get-EntraOwners 'sp' ([string]$principal.id)))) { Add-SpOwner ([string]$principal.id) $op }
+        Ok 'service principal created'
+        return [pscustomobject]@{ Principal = $principal; Refused = $false }
+    }
+    Missing 'service principal'
+    return [pscustomobject]@{ Principal = $null; Refused = $false }
+}
+# The redirect of a container app's sign-in (its callback), '' while the app's address is unknown.
+function Get-SignInRedirect($Def) {
+    $fqdn = Get-AppHost $script:apps[[string]$Def.key]
+    if (-not $fqdn) { return '' }
+    return "https://$fqdn/.auth/login/aad/callback"
+}
+# The client id the sign-in in front of a container app runs with in Azure (authConfigs), '' without one.
+function Get-LiveSignInClientId($Def) {
+    $r = $script:res[[string]$Def.key]
+    if (-not ($r -and $r.Name)) { return '' }
+    $g = [string]$r.Group
+    if (-not $g) { $g = $script:rgName }
+    $auth = Try-Az @('containerapp', 'auth', 'show', '-g', $g, '-n', [string]$r.Name)
+    $cfg = $auth
+    if ($auth -and $auth.properties) { $cfg = $auth.properties }
+    if ($cfg -and $cfg.identityProviders -and $cfg.identityProviders.azureActiveDirectory -and $cfg.identityProviders.azureActiveDirectory.registration) {
+        $id = [string]$cfg.identityProviders.azureActiveDirectory.registration.clientId
+        if (Test-Guid $id) { return $id }
+    }
+    return ''
+}
+# Step 0 for one container app with sign-in: the group whose members may sign in (saved as "<name>|<object id>", or
+# '-'), and the client id of its app registration, in this order: the saved one; the one Azure's sign-in runs with;
+# only when neither exists, the one registration with the app's name that you alone own (Resolve-EntraApp).
+function Read-SignIn($Def) {
+    $key = [string]$Def.key
+    $groupAnswer = Get-SignInGroupAnswer $key
+    $savedGroup = ''
+    if ($script:saved -and $script:saved.$groupAnswer) { $savedGroup = [string]$script:saved.$groupAnswer }
+    $at = $savedGroup.LastIndexOf('|')
+    $savedName = $savedGroup
+    $savedId = ''
+    if ($at -ge 0) { $savedName = $savedGroup.Substring(0, $at); $savedId = $savedGroup.Substring($at + 1) }
+    # A saved group id that is no object id is not used (asked again).
+    if ($savedId -and -not (Test-Guid $savedId)) { Note "X ${groupAnswer}: $savedId is not an object id (asked again)"; $savedId = '' }
+    $default = '-'
+    if ($savedName) { $default = $savedName }
+    while ($true) {
+        $a = Ask "Entra group whose members may sign in to $($Def.title) in $($script:envAbbr) (name or object id; '-' for none: nobody signs in until someone is assigned)" $default
+        if ($a -eq '-') { $script:choices[$groupAnswer] = '-'; break }
+        if ($savedId -and ($a -eq $savedName -or $a -eq $savedId)) { $script:choices[$groupAnswer] = $savedGroup; break }
+        if ($a -match '["%\r\n|]') { Note "X a group name without "", %, | or line breaks"; continue }
+        $group = Try-Az @('ad', 'group', 'show', '--group', $a)
+        # Only the id Entra returns is used (never the typed text).
+        if ($group -and (Test-Guid ([string]$group.id))) { $script:choices[$groupAnswer] = "$(([string]$group.displayName) -replace '\|', ' ')|$($group.id)"; Note "sign-in: the members of $($group.displayName)"; break }
+        Note "X no Entra group $a (or no right to read it)"
+    }
+    $idAnswer = Get-SignInClientIdAnswer $key
+    $objAnswer = Get-SignInObjectIdAnswer $key
+    $clientId = ''
+    $objectId = ''
+    if ($script:saved -and $script:saved.$idAnswer) { $clientId = [string]$script:saved.$idAnswer }
+    if ($script:saved -and $script:saved.$objAnswer) { $objectId = [string]$script:saved.$objAnswer }
+    if (-not $clientId) {
+        $clientId = Get-LiveSignInClientId $Def
+        if ($clientId) { $objectId = ''; Note "sign-in of $($script:res[$key].Name): app registration $clientId (what its sign-in runs with in Azure)" }
+    }
+    $name = [string]$script:res[$key].Name
+    if (-not $clientId -and $name) {
+        $r = Resolve-EntraApp $name '' $idAnswer (Get-SignInRedirect $Def) -SignIn
+        if ($r.App) {
+            $clientId = [string]$r.App.appId
+            $objectId = [string]$r.App.id
+            Note "sign-in of ${name}: app registration $clientId (by its name: you alone own it)"
+        }
+    }
+    $script:choices[$idAnswer] = $clientId
+    $script:choices[$objAnswer] = $objectId
+}
+# Whether a container app with sign-in may not be deployed: it runs its own image, but its sign-in's app
+# registration is unknown (Read-SignIn found none) - the template would go out without the sign-in in front of it.
+function Test-SignInUnknown($Def) {
+    if (-not (Test-SignInOn $Def)) { return $false }
+    if ([string]$script:choices[(Get-SignInClientIdAnswer ([string]$Def.key))]) { return $false }
+    $image = Get-ImageParam ([string]$Def.key)
+    return [bool]$image
+}
+# The paths that pass without sign-in, the rule of infra/generate.ps1 (Get-SignInExcludedPaths): the health path
+# (set and not '-'), then the map's signIn.excludedPaths, each "/x/*" preceded by "/x" (the wildcard doesn't cover
+# it), without repeats.
+function Get-ExcludedPaths($Def) {
+    $paths = @()
+    $health = [string]$Def.healthCheckPath
+    if ($health -and $health -ne '-') { $paths += $health }
+    if ($Def.signIn -and $Def.signIn -isnot [string]) {
+        foreach ($p in @($Def.signIn.excludedPaths | Where-Object { $_ })) {
+            $p = [string]$p
+            if ($p.EndsWith('/*')) { $paths += $p.Substring(0, $p.Length - 2) }
+            $paths += $p
+        }
+    }
+    $unique = @()
+    foreach ($p in $paths) { if ($p -and $unique -cnotcontains $p) { $unique += $p } }
+    return $unique # callers wrap it: @(Get-ExcludedPaths $Def)
+}
+# What makes a sign-in's paths unusable ('' when nothing): the root never passes without sign-in (generate.ps1
+# refuses it too) - a health path or an excluded path of '/' or '/*'.
+function Get-SignInPathProblem($Def) {
+    $health = [string]$Def.healthCheckPath
+    if ($health -eq '/' -or $health -eq '/*') { return "health path $health with sign-in would leave the whole app without sign-in (it passes without sign-in): use a path of its own, e.g. /health" }
+    if ($Def.signIn -and $Def.signIn -isnot [string]) {
+        foreach ($p in @($Def.signIn.excludedPaths | Where-Object { $_ })) {
+            if (-not ([string]$p).StartsWith('/') -or $p -eq '/' -or $p -eq '/*') { return "signIn.excludedPaths $p (a path from /, not all of them)" }
+        }
+    }
+    return ''
+}
+# The platform's action for a request without sign-in: the map's "redirect" (the default) or "401" / "403".
+function Get-UnauthenticatedAction($SignIn) {
+    $u = ([string]$SignIn.unauthenticated).ToLower()
+    if ($u -match '401') { return 'Return401' }
+    if ($u -match '403') { return 'Return403' }
+    return 'RedirectToLoginPage'
+}
+# One app role of the map as Microsoft Graph has it ("allowed": Application and/or User; displayName and description
+# default to the value).
+function ConvertTo-AppRole($Wanted, [string]$Id) {
+    $allowed = @()
+    foreach ($a in @($Wanted.allowed | Where-Object { $_ })) {
+        switch -Regex (([string]$a).ToLower()) {
+            '^app' { if ($allowed -notcontains 'Application') { $allowed += 'Application' } }
+            '^user' { if ($allowed -notcontains 'User') { $allowed += 'User' } }
+        }
+    }
+    if (-not $allowed.Count) { $allowed = @('Application') }
+    $display = [string]$Wanted.displayName
+    if (-not $display) { $display = [string]$Wanted.value }
+    $description = [string]$Wanted.description
+    if (-not $description) { $description = $display }
+    return [pscustomobject][ordered]@{ allowedMemberTypes = @($allowed); description = $description; displayName = $display; id = $Id; isEnabled = $true; value = [string]$Wanted.value }
+}
+# The app roles to write: the registration's (by value; one of the map changed in place, keeping its id), then the
+# map's new ones. Roles the map doesn't list are kept (removing one needs it disabled first: by hand). Changes: what
+# differs, empty when nothing does.
+function Get-AppRolesPlan($Existing, $Wanted) {
+    $wantedList = @($Wanted | Where-Object { $_ -and $_.value })
+    $roles = @()
+    $changes = @()
+    foreach ($e in @($Existing | Where-Object { $_ })) {
+        $role = [pscustomobject][ordered]@{ allowedMemberTypes = @($e.allowedMemberTypes); description = [string]$e.description; displayName = [string]$e.displayName; id = [string]$e.id; isEnabled = [bool]$e.isEnabled; value = [string]$e.value }
+        $w = $wantedList | Where-Object { [string]$_.value -ceq [string]$e.value } | Select-Object -First 1
+        if ($w) {
+            $n = ConvertTo-AppRole $w ([string]$e.id)
+            $same = ((@($n.allowedMemberTypes | Sort-Object) -join ',') -eq (@($role.allowedMemberTypes | Sort-Object) -join ',')) -and $n.description -ceq $role.description -and $n.displayName -ceq $role.displayName -and $role.isEnabled
+            if (-not $same) { $changes += "$($e.value) changed"; $role = $n }
+        }
+        $roles += $role
+    }
+    foreach ($w in $wantedList) {
+        if (@($Existing | Where-Object { $_ -and [string]$_.value -ceq [string]$w.value }).Count) { continue }
+        $roles += ConvertTo-AppRole $w ([guid]::NewGuid().ToString())
+        $changes += "$($w.value) added"
+    }
+    return [pscustomobject]@{ Roles = @($roles); Changes = @($changes) }
+}
+# A difference the setup fixes when asked (a start), else reports.
+function Invoke-Fix([string]$Problem, [string]$Question, [scriptblock]$Action, [string]$Done) {
+    if ($script:readOnly -or -not (Confirm-Step $Question)) { Missing $Problem; return $false }
+    & $Action | Out-Null
+    Ok $Done
+    return $true
+}
+# The step for one container app with sign-in: its app registration and service principal as the map says, each
+# change asked. Returns the client id ('' while there is none).
+function Set-SignInApp($Def) {
+    $key = [string]$Def.key
+    $si = $Def.signIn
+    $name = [string]$script:res[$key].Name
+    $idAnswer = Get-SignInClientIdAnswer $key
+    $known = [string]$script:choices[$idAnswer]
+    $fqdn = Get-AppHost $script:apps[$key]
+    # By its id when one is known; by its name only when you alone own it and it is clean (Resolve-EntraApp).
+    $found = Resolve-EntraApp $name $known $idAnswer (Get-SignInRedirect $Def) -SignIn
+    if ($found.Note) { Note "sign-in of ${name}: $($found.Note)" }
+    if ($found.Problem) { Missing "sign-in of ${name}: $($found.Problem)"; return $known }
+    $reg = $found.App
+    if (-not $fqdn) {
+        Missing "sign-in of ${name}: the app comes first (step 1); its address is the app registration's redirect"
+        if ($reg) { $script:choices[(Get-SignInObjectIdAnswer $key)] = [string]$reg.id; return [string]$reg.appId }
+        return $known
+    }
+    $redirect = "https://$fqdn/.auth/login/aad/callback"
+    if (-not (Test-SafeUri $redirect)) { Missing "sign-in of ${name}: the address $fqdn makes no usable redirect ($redirect)"; return $known }
+    $op = Get-OperatorId
+    if (-not $reg) {
+        $what = "app registration $name (the sign-in in front of ${name}: this tenant only, ID tokens, redirect $redirect, no client secret, you its only owner)"
+        if (-not $op) { Missing "${what}: made only by a signed-in user (az ad signed-in-user show), its owner"; return $known }
+        if ($script:readOnly -or -not (Confirm-Step "Create the $($what)?")) { Missing $what; return $known }
+        $reg = Invoke-Az @('ad', 'app', 'create', '--display-name', $name, '--sign-in-audience', 'AzureADMyOrg', '--web-redirect-uris', $redirect, '--enable-id-token-issuance', 'true')
+        # You as its owner (Graph doesn't always add the creator): the next run finds it by its saved id, a
+        # registration of the same name made by someone else is never taken.
+        if (-not (Test-OwnedByOperator (Get-EntraOwners 'app' ([string]$reg.appId)))) { Invoke-Az @('ad', 'app', 'owner', 'add', '--id', [string]$reg.appId, '--owner-object-id', $op) | Out-Null }
+        Ok "app registration $name created ($($reg.appId))"
+    } else { Ok "app registration $name ($($reg.appId))" }
+    $appId = [string]$reg.appId
+    $script:choices[(Get-SignInObjectIdAnswer $key)] = [string]$reg.id
+    if ($found.Source -eq 'id') {
+        # Owners: you alone (one missing is added when asked; anyone else is only reported).
+        $owners = Get-EntraOwners 'app' $appId
+        if (Test-OwnedByOperator $owners) { Ok "${name}: owned by you alone" }
+        elseif ($null -ne $owners -and -not @($owners).Count -and $op) { [void](Invoke-Fix "${name}: has no owner" "Make you the owner of $name?" { Invoke-Az @('ad', 'app', 'owner', 'add', '--id', $appId, '--owner-object-id', $op) | Out-Null } "${name}: owned by you") }
+        else { Missing "${name}: owners $(Get-OwnersText $owners) (only you should own it: az ad app owner remove --id $appId --owner-object-id <id>)" }
+    }
+    if ([string]$reg.signInAudience -ne 'AzureADMyOrg') {
+        [void](Invoke-Fix "${name}: signs in $($reg.signInAudience) (this tenant's accounts only)" "Let only this tenant's accounts sign in to $name (now $($reg.signInAudience))?" { Invoke-Az @('ad', 'app', 'update', '--id', $appId, '--sign-in-audience', 'AzureADMyOrg') | Out-Null } "${name}: this tenant only")
+    }
+    # Exactly one redirect: the app's callback (another one would send tokens elsewhere).
+    $uris = @($reg.web.redirectUris | Where-Object { $_ })
+    if ($uris.Count -eq 1 -and [string]$uris[0] -ceq $redirect) { Ok "${name}: redirect $redirect" }
+    else {
+        $now = 'none'
+        if ($uris.Count) { $now = $uris -join ', ' }
+        [void](Invoke-Fix "${name}: redirects $now (only $redirect)" "Set the redirect of $name to $redirect only (now: $now)?" { Invoke-Az @('ad', 'app', 'update', '--id', $appId, '--web-redirect-uris', $redirect) | Out-Null } "${name}: redirect $redirect")
+    }
+    if ($reg.web -and $reg.web.implicitGrantSettings -and $reg.web.implicitGrantSettings.enableIdTokenIssuance -eq $true) { Ok "${name}: ID tokens (the sign-in has no client secret)" }
+    else { [void](Invoke-Fix "${name}: ID tokens off (the sign-in without a client secret needs them)" "Turn on ID tokens for $name?" { Invoke-Az @('ad', 'app', 'update', '--id', $appId, '--enable-id-token-issuance', 'true') | Out-Null } "${name}: ID tokens") }
+    # Credentials: the sign-in uses none (no client secret), so every secret, certificate or federated credential is
+    # someone's way to act as this app - reported, never removed here.
+    $foreign = Get-ForeignCredentials $reg @()
+    if ($null -eq $foreign) { Missing "${name}: its federated credentials are not readable (az ad app federated-credential list --id $appId)" }
+    foreach ($c in @($foreign)) { Missing "${name}: has a $($c.Text) (the sign-in uses no credential)" }
+    if (Test-Yes $si.identifierUri) {
+        $uri = "api://$appId"
+        $haveUris = @($reg.identifierUris | Where-Object { $_ })
+        $odd = @($haveUris | Where-Object { -not (Test-SafeUri ([string]$_)) })
+        if ($haveUris -contains $uri) { Ok "${name}: identifier URI $uri" }
+        elseif (-not (Test-SafeUri $uri) -or $odd.Count) { Missing "${name}: no identifier URI $uri; not added here (its URIs $($odd -join ', ') aren't https://host/path or api://<id>): add it by hand" }
+        else { [void](Invoke-Fix "${name}: no identifier URI $uri" "Give $name the identifier URI $uri (the audience of tokens other applications request)?" { Invoke-Az (@('ad', 'app', 'update', '--id', $appId, '--identifier-uris') + @(@($reg.identifierUris | Where-Object { $_ }) + $uri)) | Out-Null } "${name}: identifier URI $uri") }
+    }
+    $wantedRoles = @($si.appRoles | Where-Object { $_ })
+    if ($wantedRoles.Count) {
+        $plan = Get-AppRolesPlan @($reg.appRoles) $wantedRoles
+        if (-not $plan.Changes.Count) { Ok "${name}: app roles $((@($wantedRoles | ForEach-Object { $_.value })) -join ', ')" }
+        else {
+            $objectId = [string]$reg.id
+            [void](Invoke-Fix "${name}: app roles ($($plan.Changes -join ', '))" "Set the app roles of $name ($($plan.Changes -join ', '))?" {
+                    $body = Write-TempJson 'approles.json' @{ appRoles = @($plan.Roles) }
+                    Invoke-Az @('rest', '--method', 'patch', '--url', "https://graph.microsoft.com/v1.0/applications/$objectId", '--headers', 'Content-Type=application/json', '--body', "@$body") | Out-Null
+                } "${name}: app roles $((@($wantedRoles | ForEach-Object { $_.value })) -join ', ')")
+        }
+        foreach ($extra in @($reg.appRoles | Where-Object { $_ -and @($wantedRoles | ForEach-Object { [string]$_.value }) -cnotcontains [string]$_.value })) { Note "${name}: keeps the app role $($extra.value) the map doesn't list (disable it, then remove it, by hand)" }
+    }
+
+    # The service principal (enterprise application) of this app registration (by its appId): Assignment required,
+    # the group assigned. One with owners besides you is not used.
+    $sp = Try-Az @('ad', 'sp', 'show', '--id', $appId)
+    if ($sp) {
+        $spOwners = Get-EntraOwners 'sp' ([string]$sp.id)
+        if (Test-OwnedByOperator $spOwners) { Ok "${name}: service principal (owned by you alone)" }
+        elseif ($null -ne $spOwners -and -not @($spOwners).Count -and $op) {
+            $spId = [string]$sp.id
+            if (-not (Invoke-Fix "${name}: its service principal has no owner" "Make you the owner of the service principal of $name?" { Add-SpOwner $spId $op } "${name}: service principal owned by you")) { return $appId }
+        } else { Missing "${name}: its service principal has the owners $(Get-OwnersText $spOwners), not you alone: not used (remove the others in Enterprise applications -> $name -> Owners)"; return $appId }
+    } elseif (-not $op) { Missing "${name}: service principal (made only by a signed-in user, its owner)"; return $appId }
+    elseif (-not $script:readOnly -and (Confirm-Step "Create the service principal of $name (its enterprise application in this tenant, you its owner)?")) {
+        $sp = Invoke-Az @('ad', 'sp', 'create', '--id', $appId)
+        if (-not (Test-OwnedByOperator (Get-EntraOwners 'sp' ([string]$sp.id)))) { Add-SpOwner ([string]$sp.id) $op }
+        Ok "${name}: service principal created"
+    } else { Missing "${name}: service principal"; return $appId }
+    if ($sp.appRoleAssignmentRequired -eq $true) { Ok "${name}: assignment required (only assigned users and groups sign in)" }
+    else { [void](Invoke-Fix "${name}: anyone in the tenant can sign in (assignment required is off)" "Require an assignment to sign in to $name (only the assigned group)?" { Invoke-Az @('ad', 'sp', 'update', '--id', $appId, '--set', 'appRoleAssignmentRequired=true') | Out-Null } "${name}: assignment required") }
+    $group = [string]$script:choices[(Get-SignInGroupAnswer $key)]
+    $assigned = @()
+    $listed = Try-Az @('rest', '--method', 'get', '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignedTo")
+    if ($listed) { $assigned = @($listed.value | Where-Object { $_ }) }
+    $groupId = ''
+    $at = $group.LastIndexOf('|')
+    if (-not $group -or $group -eq '-') {
+        Say "    ! ${name}: no group in the answers of $($script:envAbbr): nobody can sign in until a user or group is assigned (a dry run or start asks it)" 'Yellow'
+    } elseif ($at -lt 0 -or -not (Test-Guid $group.Substring($at + 1))) {
+        Missing "${name}: the group $group in the answers of $($script:envAbbr) has no object id (<name>|<object id>): not assigned (a dry run or start asks it again)"
+    } else {
+        $groupName = $group.Substring(0, [Math]::Max(0, $at))
+        $groupId = $group.Substring($at + 1)
+        if (@($assigned | Where-Object { [string]$_.principalId -eq $groupId }).Count) { Ok "${name}: $groupName assigned (its members sign in)" }
+        else {
+            $spId = [string]$sp.id
+            [void](Invoke-Fix "${name}: the group $groupName is not assigned (its members can't sign in)" "Assign the group $groupName to $name (its members may sign in)?" {
+                    $body = Write-TempJson 'assignment.json' ([ordered]@{ principalId = $groupId; resourceId = $spId; appRoleId = '00000000-0000-0000-0000-000000000000' })
+                    Invoke-Az @('rest', '--method', 'post', '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/appRoleAssignedTo", '--headers', 'Content-Type=application/json', '--body', "@$body") | Out-Null
+                } "${name}: $groupName assigned")
+        }
+        # A guest in the group signs in too (a single-tenant app admits B2B guests): the app must refuse them, or keep
+        # them out of the group.
+        $guests = @(Try-Az @('ad', 'group', 'member', 'list', '--group', $groupId) | Where-Object { $_ -and [string]$_.userPrincipalName -like '*#EXT#*' })
+        if ($guests.Count) { Say "    ! ${name}: $groupName has $($guests.Count) guest account(s): they can sign in too, unless the app refuses guests" 'Yellow' }
+    }
+    foreach ($o in @($assigned | Where-Object { [string]$_.principalId -ne $groupId })) {
+        if ($o.principalType -eq 'ServicePrincipal') { Note "${name}: the application $($o.principalDisplayName) has an app role (it calls the app with tokens)" }
+        else { Note "${name}: also assigned: $($o.principalDisplayName) ($($o.principalType))" }
+    }
+    return $appId
+}
+# The sign-in in front of a container app as Azure has it: on, with the app registration's client id, the map's
+# action and excluded paths. An app without it that runs its real image is reported with how to take it offline.
+function Test-SignInLive($Def, [string]$ClientId) {
+    $key = [string]$Def.key
+    $name = [string]$script:res[$key].Name
+    $app = $script:apps[$key]
+    if (-not $app) { return }
+    $image = Get-AppImage $app
+    $offline = "take it offline until then: az containerapp ingress disable -g $($script:rgName) -n $name (never turn the sign-in off instead)"
+    $auth = Try-Az @('containerapp', 'auth', 'show', '-g', $script:rgName, '-n', $name)
+    $cfg = $auth
+    if ($auth -and $auth.properties) { $cfg = $auth.properties }
+    if (-not ($cfg -and $cfg.platform -and $cfg.platform.enabled -eq $true)) {
+        if (Test-PlaceholderImage $image) { Missing "sign-in of ${name}: not there yet (it still runs the placeholder; a start makes it before the app's workflow deploys)" }
+        else { Missing "sign-in of ${name}: MISSING or off while it runs $image - $offline; then run a start" }
+        return
+    }
+    $aad = $null
+    if ($cfg.identityProviders) { $aad = $cfg.identityProviders.azureActiveDirectory }
+    $have = ''
+    if ($aad -and $aad.registration) { $have = [string]$aad.registration.clientId }
+    if (-not $aad -or $aad.enabled -eq $false -or -not $have) { Missing "sign-in of ${name}: on, but without Microsoft Entra ID ($offline)"; return }
+    if ($ClientId -and $have -ne $ClientId) { Missing "sign-in of ${name}: client id $have, its app registration is $ClientId (run a start)"; return }
+    $problems = @()
+    $gv = $cfg.globalValidation
+    $action = 'RedirectToLoginPage'
+    if ($gv -and $gv.unauthenticatedClientAction) { $action = [string]$gv.unauthenticatedClientAction }
+    $wantAction = Get-UnauthenticatedAction $Def.signIn
+    if ($action -ne $wantAction) { $problems += "without sign-in: $action, the map: $wantAction" }
+    $pathProblem = Get-SignInPathProblem $Def
+    if ($pathProblem) { $problems += $pathProblem }
+    $wantPaths = @(Get-ExcludedPaths $Def)
+    $havePaths = @()
+    if ($gv) { $havePaths = @($gv.excludedPaths | Where-Object { $_ }) }
+    if (Compare-Object @($wantPaths | Sort-Object) @($havePaths | Sort-Object)) { $problems += "paths without sign-in: $(if ($havePaths.Count) { $havePaths -join ', ' } else { 'none' }), the map: $(if ($wantPaths.Count) { $wantPaths -join ', ' } else { 'none' })" }
+    if ($problems.Count) { Missing "sign-in of ${name}: $($problems -join '; ') (a start deploys the map's)"; return }
+    # Its app registration and service principal as the setup makes them (report only).
+    $regProblems = @(Get-SignInRegistrationDrift $Def $have)
+    if ($regProblems.Count) { Missing "sign-in of ${name}: its app registration $have differs: $($regProblems -join '; ') (a start fixes what it may)"; return }
+    $free = ''
+    if ($wantPaths.Count) { $free = "; open: $($wantPaths -join ', ')" }
+    Ok "sign-in in front of $name (Microsoft Entra ID, $have$free)"
+}
+# How a sign-in's app registration and service principal differ from what the setup makes: exactly the app's
+# callback as redirect, ID tokens on, Assignment required, you their only owner. Empty when they don't.
+function Get-SignInRegistrationDrift($Def, [string]$ClientId) {
+    $name = [string]$script:res[[string]$Def.key].Name
+    $out = @()
+    if (-not (Test-Guid $ClientId)) { return @("client id $ClientId is no id") }
+    $reg = Try-Az @('ad', 'app', 'show', '--id', $ClientId)
+    if (-not $reg) { return @('not found or not readable') }
+    $fqdn = Get-AppHost $script:apps[[string]$Def.key]
+    $uris = @($reg.web.redirectUris | Where-Object { $_ })
+    if ($fqdn) {
+        $redirect = "https://$fqdn/.auth/login/aad/callback"
+        if (-not ($uris.Count -eq 1 -and [string]$uris[0] -ceq $redirect)) { $out += "redirects $(if ($uris.Count) { $uris -join ', ' } else { 'none' }) (only $redirect)" }
+    }
+    if (-not ($reg.web -and $reg.web.implicitGrantSettings -and $reg.web.implicitGrantSettings.enableIdTokenIssuance -eq $true)) { $out += 'ID tokens off' }
+    $foreign = Get-ForeignCredentials $reg @()
+    if ($null -eq $foreign) { $out += 'federated credentials not readable' }
+    foreach ($c in @($foreign)) { $out += "a $($c.Text) (the sign-in uses no credential)" }
+    $owners = Get-EntraOwners 'app' $ClientId
+    if (-not (Test-OwnedByOperator $owners)) { $out += "owners $(Get-OwnersText $owners) (only you)" }
+    $sp = Try-Az @('ad', 'sp', 'show', '--id', $ClientId)
+    if (-not $sp) { $out += 'no service principal' }
+    else {
+        if ($sp.appRoleAssignmentRequired -ne $true) { $out += 'assignment required off (anyone in the tenant signs in)' }
+        $spOwners = Get-EntraOwners 'sp' ([string]$sp.id)
+        if (-not (Test-OwnedByOperator $spOwners)) { $out += "service principal owners $(Get-OwnersText $spOwners) (only you)" }
+    }
+    return $out
+}
+# A deleted container app's sign-in app registration, asked: no by default. By its saved client id; by its name
+# only when no id is saved and you alone own it (Resolve-EntraApp). Entra keeps a deleted app registration
+# restorable for 30 days.
+function Remove-SignInRegistration([string]$DisplayName, [string]$ClientId, [string]$Answer) {
+    $found = Resolve-EntraApp $DisplayName $ClientId $Answer '' -SignIn
+    if ($found.Note) { Note $found.Note }
+    if ($found.Problem) { Note "sign-in of ${DisplayName}: $($found.Problem); not deleted"; return }
+    $reg = $found.App
+    if (-not $reg) { return }
+    if (Confirm-Step "Delete the app registration $DisplayName ($($reg.appId)), the sign-in in front of the deleted app (restorable for 30 days in Entra's deleted applications)?" -DefaultNo) {
+        Invoke-Az @('ad', 'app', 'delete', '--id', [string]$reg.appId) | Out-Null # its service principal and assignments go with it
+        Ok "app registration $DisplayName deleted"
+    } else { Note "app registration $DisplayName kept (az ad app delete --id $($reg.appId))" }
+}
+# main.bicep again within a start, with some parameters changed (a sign-in's client id, a container app's first image):
+# the parameters file rewritten (the same path $Deployment names), what-if shown, then the deployment asked. $true
+# when it was deployed. Only parameters main.bicep declares.
+function Invoke-TemplateAgain($Parameters, [hashtable]$Values, [string[]]$Deployment, [string[]]$Declared, [string]$Question) {
+    foreach ($p in $Values.Keys) {
+        if ($Declared -notcontains $p) { Missing "infra/$($map.project.template) has no parameter $p (run .\infra\generate.ps1)"; return $false }
+        $Parameters[$p] = @{ value = $Values[$p] }
+    }
+    Write-TempJson 'parameters.json' ([ordered]@{
+            '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+            contentVersion = '1.0.0.0'
+            parameters     = $Parameters
+        }) | Out-Null
+    Note 'comparing Azure with the template again (what-if)...'
+    $whatIf = Invoke-Az (@('deployment', 'group', 'what-if') + $Deployment + @('--no-pretty-print'))
+    foreach ($c in @($whatIf.changes | Where-Object { Test-RealChange $_ })) { Note ("{0,-8} {1}" -f $c.changeType, ($c.resourceId -split '/providers/')[-1]) }
+    if (-not (Confirm-Step $Question)) { return $false }
+    Invoke-Az (@('deployment', 'group', 'create') + $Deployment) | Out-Null
+    return $true
+}
+# The run this start dispatched: the workflow's run-name puts the nonce it was dispatched with into the run's title
+# ("<workflow> <nonce>"), so only a run whose title holds that nonce as a word is it - on $Branch, when given. Never
+# the newest run instead. @{ Ids } - more than one is never guessed between.
+function Select-DispatchedRun($List, [string]$Nonce, [string]$Branch) {
+    if (-not $Nonce) { return [pscustomobject]@{ Ids = @() } }
+    $c = @($List | Where-Object { $_ -and (([string]$_.displayTitle) -split ' ') -ccontains $Nonce })
+    if ($Branch) { $c = @($c | Where-Object { [string]$_.headBranch -ceq $Branch }) }
+    return [pscustomobject]@{ Ids = @($c | ForEach-Object { [string]$_.databaseId }) }
+}
+# A container app's first image (the step "First image"): its workflow run with push-only on the environment's deploy
+# branch (the default branch for manual-only environments), waited for, then the image it pushed (tagged with the
+# run's commit) as <login server>/<repository>:<tag>. '' when it failed (reported).
+function Invoke-FirstImageBuild($Def, [string]$Repo, [string]$Branch, [string]$GhEnv) {
+    $wf = [string]$Def.deploy.workflow
+    $name = [string]$script:res[$Def.key].Name
+    $useBranch = $Branch -and $Branch -ne '-'
+    # This start's run is the one whose title carries this nonce (the workflow's input nonce, its run-name).
+    $nonce = [guid]::NewGuid().ToString('N')
+    $run = @('workflow', 'run', $wf, '--repo', $Repo, '-f', "environment=$GhEnv", '-f', 'push-only=true', '-f', "nonce=$nonce")
+    if ($useBranch) { $run += @('--ref', $Branch) }
+    $r = Invoke-Native $ghExe $run
+    if ($r.Code -ne 0) { Missing "${name}: its workflow $wf didn't start ($($r.Errors.Trim())); is .github/workflows/$wf pushed to $(if ($useBranch) { $Branch } else { 'the default branch' }), generated by this kit (its input nonce)?"; return '' }
+    Note "${name}: $wf started (push only, $nonce); waiting for its run..."
+    $pick = $null
+    for ($i = 0; $i -lt 20 -and -not $pick; $i++) {
+        Start-Sleep -Seconds 3
+        $listArgs = @('run', 'list', '--repo', $Repo, '--workflow', $wf, '--event', 'workflow_dispatch', '--limit', '20', '--json', 'databaseId,createdAt,headBranch,displayTitle')
+        if ($useBranch) { $listArgs += @('--branch', $Branch) }
+        $list = @(Try-Gh $listArgs -Json | Where-Object { $_ })
+        $p = Select-DispatchedRun $list $nonce $(if ($useBranch) { $Branch } else { '' })
+        if ($p.Ids.Count) { $pick = $p }
+    }
+    if (-not $pick) { Missing "${name}: no run of $wf titled with $nonce showed up (https://github.com/$Repo/actions; a workflow without the kit's run-name never does: regenerate and push it)"; return '' }
+    # Never a guess: another run of the same workflow started at the same time (someone else, another start).
+    if ($pick.Ids.Count -gt 1) { Missing "${name}: $($pick.Ids.Count) runs of $wf started at the same time ($($pick.Ids -join ', ')): which one is this start's is unknown - wait for them (https://github.com/$Repo/actions), then start again"; return '' }
+    $id = [string]$pick.Ids[0]
+    Note "https://github.com/$Repo/actions/runs/$id (a few minutes)"
+    [void](Invoke-Native $ghExe @('run', 'watch', $id, '--repo', $Repo, '--exit-status', '--interval', '15'))
+    $done = Try-Gh @('run', 'view', $id, '--repo', $Repo, '--json', 'conclusion,headSha') -Json
+    if (-not ($done -and $done.conclusion -eq 'success')) { Missing "${name}: the run of $wf ended $(if ($done) { $done.conclusion } else { 'unknown' }) (gh run view $id --repo $Repo --log-failed)"; return '' }
+    $image = Get-PushedImage $Def ([string]$done.headSha)
+    if (-not $image) { Missing "${name}: no image of the run's commit $($done.headSha) in its registry" }
+    return $image
+}
+# One answer of the environment's saved file changed (a start, after the answers were saved: the sign-in's client id).
+function Save-EnvAnswer([string]$File, [string]$Name, [string]$Value) {
+    if ($script:readOnly -or -not (Test-Path $File)) { return }
+    $saved = Read-Json $File
+    if ([string]$saved.$Name -eq $Value) { return }
+    Set-Prop $saved $Name $Value
+    [IO.File]::WriteAllText($File, (ConvertTo-Json -InputObject $saved -Depth 10) + "`n", $utf8)
+    $script:saved = $saved
+    Note "infra/environments/$(Split-Path $File -Leaf): $Name = $Value (commit it)"
+}
+
 # --- database access (SQL): the apps' database users -----------------------------------------------------
 
 # Azure SQL with your Entra sign-in. When the server's firewall doesn't let your address through, a start
@@ -1050,33 +2122,56 @@ function Invoke-SqlText($Conn, [string]$Text) {
     $cmd.CommandText = $Text
     [void]$cmd.ExecuteNonQuery()
 }
-# One "sql" connection: the app's managed identity as a database user (by its client id, so the server
-# needs no directory rights) with the map's database roles.
+# A database user's SID from an Entra client id (application id).
+function Get-EntraSid([string]$ClientId) {
+    return '0x' + ((([guid]$ClientId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
+}
+# One "sql" connection: the app's identity as a database user (by its client id, so the server needs no
+# directory rights) with the map's database roles. The user is named after the identity: the app's own one, or
+# the app itself for an entry without one (its system-assigned identity).
+$script:oldSqlUsers = New-Object System.Collections.ArrayList
 function Grant-DatabaseUser($C) {
     $appRes = $script:res[$C.from]
-    $app = $script:apps[$C.from]
+    $appDef = Get-Def $C.from
     $db = $script:res[$C.to]
     $hostLink = @($map.connections | Where-Object { $_.from -eq $C.to -and $_.kind -eq 'host' }) | Select-Object -First 1
     $server = $script:res[$hostLink.to]
     $group = $server.Group
     if (-not $group) { $group = $script:rgName }
     $user = [string]$appRes.Name
+    if ($appDef.identity -and $script:res[[string]$appDef.identity]) { $user = [string]$script:res[[string]$appDef.identity].Name }
     $label = "$user in $($db.Name)"
-    if (-not $app) { Missing "database user ${label}: the app comes first"; return }
+    $ident = Get-RunIdentity $C.from
+    if (-not $ident) {
+        if ($appDef.identity) { Missing "database user ${label}: the app's identity comes first" } else { Missing "database user ${label}: the app comes first" }
+        return
+    }
     if (-not (Try-Az @('sql', 'db', 'show', '-g', $group, '-s', $server.Name, '-n', $db.Name))) { Missing "database user ${label}: the database comes first"; return }
     $conn = Open-Sql $group $server.Name $db.Name
     if (-not $conn) { return }
     $quoted = '[' + $user.Replace(']', ']]') + ']'
     try {
-        $exists = [bool](Get-SqlRows $conn 'SELECT name FROM sys.database_principals WHERE name = @n' $user).Count
+        $sids = Get-SqlRows $conn 'SELECT CONVERT(varchar(100), sid, 1) FROM sys.database_principals WHERE name = @n' $user
+        $exists = [bool]$sids.Count
+        # A user of that name made from another identity (an identity deleted and made again gets a new client id):
+        # it would let the old one in, not the app.
+        if ($exists -and $ident.ClientId -and $sids[0] -ine (Get-EntraSid $ident.ClientId)) {
+            Missing "database user ${label}: made for another identity, not $($ident.Name) ($($ident.ClientId)); drop it (DROP USER $quoted in $($db.Name)), then run this again"
+            return
+        }
         if ($exists) { Ok "database user $label" }
         elseif (Confirm-Step "Create the database user $user in $($db.Name) (the app's managed identity signs in as it)?") {
-            $sp = Invoke-Az @('ad', 'sp', 'show', '--id', $app.identity.principalId)
-            $sid = '0x' + ((([guid]$sp.appId).ToByteArray() | ForEach-Object { $_.ToString('X2') }) -join '')
-            Invoke-SqlText $conn "CREATE USER $quoted WITH SID = $sid, TYPE = E"
+            $clientId = $ident.ClientId
+            if (-not $clientId) { $clientId = [string](Invoke-Az @('ad', 'sp', 'show', '--id', $ident.PrincipalId)).appId }
+            Invoke-SqlText $conn "CREATE USER $quoted WITH SID = $(Get-EntraSid $clientId), TYPE = E"
             Ok "database user $label created"
             $exists = $true
         } else { Missing "database user $label" }
+        # The app's earlier user, made for its system-assigned identity (named after the app) before it had its own:
+        # listed in the next steps, to drop by hand once the app works with its own identity.
+        if ($appDef.identity -and $appRes.Name -and $appRes.Name -ne $user -and (Get-SqlRows $conn "SELECT name FROM sys.database_principals WHERE name = @n AND type = 'E'" ([string]$appRes.Name)).Count) {
+            [void]$script:oldSqlUsers.Add([pscustomobject]@{ App = [string]$appRes.Name; User = [string]$appRes.Name; Database = [string]$db.Name; Server = [string]$server.Name })
+        }
         if ($exists) {
             $have = Get-SqlRows $conn 'SELECT r.name FROM sys.database_role_members m JOIN sys.database_principals r ON r.principal_id = m.role_principal_id JOIN sys.database_principals u ON u.principal_id = m.member_principal_id WHERE u.name = @n' $user
             $want = @($C.dbRoles | Where-Object { $_ })
@@ -1157,15 +2252,56 @@ function Grant-DeployDatabaseUser([string]$DatabaseKey, [string]$User, [string]$
     finally { $conn.Close() }
 }
 
-# The apps (App Service, Static Web App) as Azure shows them, or nothing.
+# The apps (App Service, Static Web App, Container App) as Azure shows them, or nothing.
 function Get-App([string]$Key) {
     $def = Get-Def $Key
     $r = $script:res[$Key]
     if (-not $r -or -not $r.Name) { return }
-    if ($def.armType -eq 'Microsoft.Web/sites') { return Try-Az @('webapp', 'show', '-g', $script:rgName, '-n', $r.Name) }
-    if ($def.armType -eq 'Microsoft.Web/staticSites') { return Try-Az @('staticwebapp', 'show', '-g', $script:rgName, '-n', $r.Name) }
+    return Show-App ([string]$def.armType) $script:rgName $r.Name
 }
-# An app's settings as name -> value (empty when it can't be read).
+# A resource of the map's id: an app as this run found it, else the resource by its name (also one shared from another
+# group, or one the template created during this run); '' while it doesn't exist.
+function Get-ResourceId([string]$Key) {
+    $app = $script:apps[$Key]
+    if ($app -and $app.id) { return [string]$app.id }
+    $r = $script:res[$Key]
+    $def = Get-Def $Key
+    if (-not ($r -and $r.Name -and $def)) { return '' }
+    if ($r.Found -and $r.Found.id) { return [string]$r.Found.id }
+    $found = $null
+    try { $found = Find-Resource $r.Name ([string]$def.armType) } catch { }
+    if ($found) { return [string]$found.id }
+    return ''
+}
+function Show-App([string]$ArmType, [string]$Group, [string]$Name) {
+    if ($ArmType -eq 'Microsoft.Web/sites') { return Try-Az @('webapp', 'show', '-g', $Group, '-n', $Name) }
+    if ($ArmType -eq 'Microsoft.Web/staticSites') { return Try-Az @('staticwebapp', 'show', '-g', $Group, '-n', $Name) }
+    if ($ArmType -eq $containerAppType) { return Try-Az @('containerapp', 'show', '-g', $Group, '-n', $Name) }
+}
+# An app's address: App Service and Static Web Apps' default host name (staticSites: defaultHostname, the same to
+# PowerShell), a Container App's ingress FQDN. Empty while it has none.
+function Get-AppHost($App) {
+    if (-not $App) { return '' }
+    if ($App.defaultHostName) { return [string]$App.defaultHostName }
+    if ($App.properties -and $App.properties.configuration -and $App.properties.configuration.ingress -and $App.properties.configuration.ingress.fqdn) { return [string]$App.properties.configuration.ingress.fqdn }
+    return ''
+}
+# The image a Container App runs now (its first container's), '' when it can't be told.
+function Get-AppImage($App) {
+    if (-not ($App -and $App.properties -and $App.properties.template)) { return '' }
+    $first = @($App.properties.template.containers | Where-Object { $_ }) | Select-Object -First 1
+    if ($first) { return [string]$first.image }
+    return ''
+}
+# The public placeholder a new Container App starts with (any tag of it).
+function Test-PlaceholderImage([string]$Image) {
+    if (-not $Image) { return $true }
+    return $Image -match '^mcr\.microsoft\.com/k8se/quickstart(:|@|$)'
+}
+# A setting of a Container App that is a secret reference (a Key Vault secret): compared by name only, its value never read.
+$secretRefMark = 'secretRef:'
+# An app's settings as name -> value (empty when it can't be read). A Container App's are its first container's
+# environment variables; a secret reference is "secretRef:<secret name>", never the value.
 function Get-AppSettings([string]$Key) {
     $def = Get-Def $Key
     $name = $script:res[$Key].Name
@@ -1175,6 +2311,17 @@ function Get-AppSettings([string]$Key) {
     } elseif ($def.armType -eq 'Microsoft.Web/staticSites') {
         $s = Try-Az @('staticwebapp', 'appsettings', 'list', '-g', $script:rgName, '-n', $name)
         if ($s -and $s.properties) { foreach ($p in $s.properties.PSObject.Properties) { $have[$p.Name] = [string]$p.Value } }
+    } elseif ($def.armType -eq $containerAppType) {
+        $app = $script:apps[$Key]
+        if (-not $app) { $app = Get-App $Key }
+        $first = $null
+        if ($app -and $app.properties -and $app.properties.template) { $first = @($app.properties.template.containers | Where-Object { $_ }) | Select-Object -First 1 }
+        if ($first) {
+            foreach ($e in @($first.env | Where-Object { $_ })) {
+                if ($e.secretRef) { $have[[string]$e.name] = $secretRefMark + [string]$e.secretRef }
+                else { $have[[string]$e.name] = [string]$e.value }
+            }
+        }
     }
     return $have
 }
@@ -1379,6 +2526,10 @@ function Add-AppServiceDomain($Dm, [string]$Domain) {
 # custom domains and deploy branch left out (they belong to it).
 function Copy-Answers($Source, [string]$From, [string]$To) {
     $copy = (ConvertTo-Json -InputObject $Source -Depth 10) | ConvertFrom-Json
+    # A sign-in's app registration belongs to its environment (named after the app there): its client id isn't copied.
+    foreach ($d in @(Get-SignInDefs)) { $copy.PSObject.Properties.Remove((Get-SignInClientIdAnswer ([string]$d.key))); $copy.PSObject.Properties.Remove((Get-SignInObjectIdAnswer ([string]$d.key))) }
+    # So is GitHub Actions' app registration (one per environment).
+    foreach ($d in @($defs | Where-Object { $_.ask -eq 'name' -and $_.type -eq 'deploy' })) { $copy.PSObject.Properties.Remove((Get-DeployClientIdAnswer ([string]$d.key))) }
     foreach ($p in @($copy.names.PSObject.Properties)) {
         if ($copy.groups -and $copy.groups.($p.Name)) { continue } # shared from another group: as it is
         $def = Get-Def $p.Name
@@ -1735,6 +2886,17 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
         $ph["q.$($q.id).name"] = $v.Split('|')[0].ToLower()
         $ph["q.$($q.id).version"] = $v.Split('|')[-1]
     }
+    # With sign-in the health path passes without it: never the root (infra/generate.ps1 refuses it too).
+    $healthQ = @($bp.questions | Where-Object { $_ -and $_.id -eq 'health' }) | Select-Object -First 1
+    if ($healthQ -and $answers.ContainsKey('signIn') -and @('', 'none') -notcontains ([string]$answers['signIn']).ToLower()) {
+        while (@('/', '/*') -contains ([string]$answers['health'])) {
+            Note "X health path $($answers['health']) with sign-in would leave the whole app without sign-in (it passes without sign-in): a path of its own, e.g. /health"
+            $answers['health'] = Ask (Get-Filled $healthQ.label $ph @{}) '/health'
+            $ph['q.health'] = [string]$answers['health']
+            $ph['q.health.name'] = ([string]$answers['health']).Split('|')[0].ToLower()
+            $ph['q.health.version'] = ([string]$answers['health']).Split('|')[-1]
+        }
+    }
     # The naming type: the catalog's, or another type of naming.json a spec names ("namingType": "dfunc" for a
     # function app with Durable Functions, as analyze.ps1 suggests).
     $namingType = [string]$bp.naming.type
@@ -1750,13 +2912,30 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
     # Its own sub application name (several APIs...): the naming type, or the key when that is taken.
     $target = $namingType
     if (@($map.resources | Where-Object { $_.target -eq $target -or $_.type -eq $target }).Count) { $target = $newKey.ToLower() }
+    # An app's own identity has its app's target (named after the app, see Get-IdentityRuleName).
+    if ($Preset -and $Preset.target) { $target = [string]$Preset.target }
     $ph['target'] = $target
+    if ($Preset -and $Preset.owner) { $ph['owner'] = [string]$Preset.owner }
 
     $links = @()
+    $owned = @()
     foreach ($c in @($bp.creates | Where-Object { $_ -and (Test-Answers $_.when $answers) })) {
         $subKey = [string](Get-Filled $c.key $ph $answers)
-        $sub = Add-FromBlueprint $c.kind @{ key = $subKey; title = [string](Get-Filled $c.title $ph $answers) }
-        $links += , @($sub, $c.connection)
+        $subPreset = @{ key = $subKey; title = [string](Get-Filled $c.title $ph $answers) } # not $preset: that is $Preset
+        # The app's own identity ("owner": "<key>"): owned by it, with its target, never shared
+        # (infra/LAZYBICEP.md, "Identity").
+        $isOwned = $c.kind -eq 'appIdentity' -or $c.owner
+        if ($isOwned) {
+            $subPreset.owner = $newKey
+            $subPreset.target = $target
+            if ($c.owner) { $subPreset.owner = [string](Get-Filled $c.owner $ph $answers) }
+            if ($c.target) { $subPreset.target = [string](Get-Filled $c.target $ph $answers) }
+        }
+        $sub = Add-FromBlueprint $c.kind $subPreset
+        Head "$($bp.title): $title"
+        if ($isOwned) { $owned += $sub }
+        # Only a "creates" with a connection links it (an app's identity is named by the app's "identity").
+        if ($c.connection) { $links += , @($sub, $c.connection) }
         if ($c.connection.kind -eq 'host') { $ph['host'] = $sub; $ph['host.title'] = (Get-Def $sub).title }
     }
     foreach ($r in @($bp.requires | Where-Object { $_ -and (Test-Answers $_.when $answers) })) {
@@ -1765,7 +2944,8 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
         if ($r.kinds) { $kinds = @($r.kinds) }
         $as = [string]$r.kind
         if ($r.as) { $as = [string]$r.as }
-        $have = @($map.resources | Where-Object { $kinds -contains $_.kind } | ForEach-Object { $_.key })
+        # An app's own identity is never offered to another resource.
+        $have = @($map.resources | Where-Object { $kinds -contains $_.kind -and -not $_.owner } | ForEach-Object { $_.key })
         $question = Get-Filled $r.question $ph $answers
         $want = $null
         if ($Spec -and $Spec.requires -and $Spec.requires.$as) { $want = [string]$Spec.requires.$as }
@@ -1780,13 +2960,41 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
             Head "$($bp.title): $title"
         }
         $links += , @($chosen, $r.connection)
-        if ($r.field) { $ph[[string]$r.field] = $chosen }
+        if ($r.field) {
+            $ph[[string]$r.field] = $chosen
+            # <REGISTRY> for "field": "registry": its key upper-cased, for GitHub variable names (AZURE_<REGISTRY>_NAME).
+            $upper = Get-Upper ([string]$r.field)
+            if (-not $ph.ContainsKey($upper)) { $ph[$upper] = Get-Upper $chosen }
+        }
         if ($r.connection.kind -eq 'host') { $ph['host'] = $chosen; $ph['host.title'] = (Get-Def $chosen).title }
     }
 
     $entry = Get-Filled $bp.entry $ph $answers
     if ($namingType -ne [string]$bp.naming.type -and $entry.PSObject.Properties['type']) { $entry.type = $namingType }
+    # An app's identity names its owner (and its target); the app names its identity.
+    if ($Preset -and $Preset.owner) {
+        Set-Prop $entry 'target' $target
+        Set-Prop $entry 'owner' ([string]$Preset.owner)
+    }
+    if ($owned.Count) { Set-Prop $entry 'identity' $owned[0] }
     if ($entry.PSObject.Properties['healthCheckPath'] -and $entry.healthCheckPath -eq '-') { $entry.healthCheckPath = '' }
+    # A spec's sign-in (an import of a running app): what happens without sign-in and the paths it leaves out go into
+    # the entry's signIn (never a client id: that belongs to the environment's answers).
+    if ($Spec -and $Spec.signIn -and $Spec.signIn -isnot [string] -and $entry.PSObject.Properties['signIn'] -and (Test-SignInOn $entry)) {
+        if ($entry.signIn -is [string]) { $entry.signIn = [pscustomobject][ordered]@{ provider = [string]$entry.signIn } }
+        $u = ([string]$Spec.signIn.unauthenticated).ToLower()
+        if (@('redirect', '401', '403') -contains $u) { Set-Prop $entry.signIn 'unauthenticated' $u }
+        elseif ($u) { Note "X ${newKey}: signIn.unauthenticated $u (redirect, 401 or 403): the catalog's kept" }
+        if ($null -ne $Spec.signIn.excludedPaths) {
+            $paths = @()
+            foreach ($p in @($Spec.signIn.excludedPaths | Where-Object { $_ })) {
+                $p = [string]$p
+                if (-not $p.StartsWith('/') -or $p -eq '/' -or $p -eq '/*') { Note "X ${newKey}: signIn.excludedPaths $p left out (a path from /, not all of them)"; continue }
+                if ($paths -cnotcontains $p) { $paths += $p }
+            }
+            Set-Prop $entry.signIn 'excludedPaths' @($paths)
+        }
+    }
     # The catalog's workflows build .NET: another runtime gets no generated deploy (its workflow by hand).
     if ($entry.deploy -and $entry.deploy.dotnet -and $entry.runtime -and $entry.runtime -notmatch '^DOTNET') {
         $entry.PSObject.Properties.Remove('deploy')
@@ -1797,9 +3005,12 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
     $list = @($map.resources)
     $at = $list.Count
     for ($i = 0; $i -lt $list.Count; $i++) { if ($list[$i].kind -eq 'entraDeployApp') { $at = $i; break } }
+    # (An app's own identity, added first by "creates", stays before it; Read-Resource asks the app's sub
+    # application name for it.)
     $map.resources = @($list | Select-Object -First $at) + $entry + @($list | Select-Object -Skip $at)
     $script:defs = @($map.resources)
     Note "resource: $newKey ($Kind) - $title"
+    if ($Preset -and $Preset.owner) { Note "$newKey belongs to $($Preset.owner): made and removed with it, never used by another resource" }
     foreach ($l in $links) {
         $c = [ordered]@{ from = $newKey; to = $l[0] }
         foreach ($q in (Get-Filled $l[1] $ph $answers).PSObject.Properties) { $c[$q.Name] = $q.Value }
@@ -1828,7 +3039,7 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
     if ($bp.app) {
         $usable = @()
         foreach ($d in @($map.resources)) {
-            if ($d.key -eq $newKey -or -not $d.kind) { continue }
+            if ($d.key -eq $newKey -or -not $d.kind -or $d.owner) { continue }
             # Only what every environment has (not one that exists only for some answers, like a separate
             # Application Insights of the web app).
             if ($d.when -or $d.optional) { continue }
@@ -1865,7 +3076,23 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
             $map.github.deployRoles = @(@($map.github.deployRoles) | Where-Object { $_ }) + [pscustomobject][ordered]@{ role = $gh.deployRole; resource = $newKey }
             Note "GitHub Actions' app registration: $($gh.deployRole) on $newKey"
         }
+        # Deploy roles on what the app deploys into besides itself (a container app's registry: AcrPush), with the
+        # resource's key filled in ("resource": "<registry>").
+        foreach ($dr in @($gh.deployRoles | Where-Object { $_ -and $_.role -and $_.resource })) {
+            $have = @(@($map.github.deployRoles) | Where-Object { $_ -and $_.role -eq $dr.role -and $_.resource -eq $dr.resource })
+            if ($have.Count) { continue }
+            $map.github.deployRoles = @(@($map.github.deployRoles) | Where-Object { $_ }) + [pscustomobject][ordered]@{ role = [string]$dr.role; resource = [string]$dr.resource }
+            Note "GitHub Actions' app registration: $($dr.role) on $($dr.resource)"
+        }
         if ($gh.variable) { Set-Prop $map.github.variables $gh.variable "{$newKey.name}"; Note "GitHub variable $($gh.variable) = {$newKey.name}" }
+        # More variables ("variables": { "AZURE_<KEY>_GROUP": "{<key>.group}", "AZURE_<REGISTRY>_NAME": "{<registry>.name}" }).
+        if ($gh.variables) {
+            foreach ($p in $gh.variables.PSObject.Properties) {
+                $varName = [string](Get-Filled ([string]$p.Name) $ph $answers) # the names have placeholders too
+                Set-Prop $map.github.variables $varName ([string]$p.Value)
+                Note "GitHub variable $varName = $($p.Value)"
+            }
+        }
         if ($gh.tokenSecret) {
             $map.github.tokenSecrets = @(@($map.github.tokenSecrets) | Where-Object { $_ }) + [pscustomobject][ordered]@{ name = $gh.tokenSecret; resource = $newKey }
             Note "GitHub secret $($gh.tokenSecret): the deployment token of $newKey"
@@ -1896,7 +3123,44 @@ function Add-FromBlueprint([string]$Kind, [hashtable]$Preset, $Spec) {
             $map.removeOrder = @($order | Select-Object -First $at) + $t + @($order | Select-Object -Skip $at)
         }
     }
+    Set-IdentityRemoveOrder
     return $newKey
+}
+# The apps' identities are deleted after the apps (an app's identity is added before its app, so its own
+# "before" can't say that): moved right after the last app type, added there when the map has one.
+function Set-IdentityRemoveOrder {
+    # Container apps before their environment and registry (each kind's own "before" may not see the others).
+    if ($map.PSObject.Properties['removeOrder']) {
+        $fixed = @(Get-ContainerRemoveOrder @($map.removeOrder | Where-Object { $_ }))
+        if (($fixed -join ',') -ne (@($map.removeOrder | Where-Object { $_ }) -join ',')) { $map.removeOrder = $fixed }
+    }
+    if (-not @($map.resources | Where-Object { $_.armType -eq $identityType }).Count) { return }
+    $order = @($map.removeOrder | Where-Object { $_ })
+    $at = [array]::IndexOf(@($order | ForEach-Object { $_.ToLower() }), $identityType.ToLower())
+    $lastApp = -1
+    for ($i = 0; $i -lt $order.Count; $i++) { if ($identityAppTypes -contains $order[$i]) { $lastApp = $i } }
+    if ($at -ge 0 -and $at -gt $lastApp) { return }
+    $rest = @($order | Where-Object { $_ -ine $identityType })
+    $lastApp = -1
+    for ($i = 0; $i -lt $rest.Count; $i++) { if ($identityAppTypes -contains $rest[$i]) { $lastApp = $i } }
+    if ($lastApp -lt 0) { $map.removeOrder = @($rest) + $identityType; return }
+    $map.removeOrder = @($rest | Select-Object -First ($lastApp + 1)) + $identityType + @($rest | Select-Object -Skip ($lastApp + 1))
+}
+
+# A remove order with container apps before the first Container Apps environment or registry in it (moved there, or
+# added there when it has them but no container apps); unchanged otherwise.
+function Get-ContainerRemoveOrder([object[]]$Order) {
+    $list = @($Order | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $first = -1
+    for ($i = 0; $i -lt $list.Count; $i++) { if (@($containerEnvType, $registryType) -contains $list[$i] -and $first -lt 0) { $first = $i } }
+    if ($first -lt 0) { return $list }
+    $at = -1
+    for ($i = 0; $i -lt $list.Count; $i++) { if ($list[$i] -ieq $containerAppType) { $at = $i } }
+    if ($at -ge 0 -and $at -lt $first) { return $list }
+    $rest = @($list | Where-Object { $_ -ine $containerAppType })
+    $first = -1
+    for ($i = 0; $i -lt $rest.Count; $i++) { if (@($containerEnvType, $registryType) -contains $rest[$i] -and $first -lt 0) { $first = $i } }
+    return @(@($rest | Select-Object -First $first) + $containerAppType + @($rest | Select-Object -Skip $first))
 }
 
 # Each round of a map mode (and each '<') starts from the files as they are: nothing half-added stays.
@@ -2011,14 +3275,20 @@ function Find-MapResource($Def, $Saved, [string]$HostKey) {
     if (-not $r) { return }
     return [pscustomobject]@{ Id = $r.id; Type = $Def.title; Group = $rg; Ours = [bool]($r.tags -and $r.tags.'managed-by' -eq $managedBy) }
 }
-# Deletes it: an app's role assignments first (they'd stay as "unknown"), a Key Vault's purge asked.
-function Remove-MapResource($Def, $Found) {
-    if ($Def.armType -eq 'Microsoft.Web/sites') {
-        $app = Try-Az @('webapp', 'show', '--ids', $Found.Id)
-        if ($app -and $app.identity -and $app.identity.principalId) {
-            $ras = @(Try-Az @('role', 'assignment', 'list', '--assignee', $app.identity.principalId, '--all') | Where-Object { $_ })
+# Deletes it: an app's role assignments first (they'd stay as "unknown"; its own identity's, or the system-assigned
+# one's of an entry without one; $Saved: the environment's answers, with the identity's name), a Key Vault's
+# purge asked. The app's own identity is deleted after the app, by the caller.
+function Remove-MapResource($Def, $Found, $Saved) {
+    if ($Def.identity -or $identityAppTypes -contains [string]$Def.armType) {
+        $app = $null
+        $identityName = ''
+        if ($Def.identity) { $identityName = [string]$Saved.names.([string]$Def.identity) }
+        else { $app = Show-App ([string]$Def.armType) $Found.Group (($Found.Id -split '/')[-1]) }
+        $ident = Get-AppIdentity $Def $Found.Group $identityName $app
+        if ($ident) {
+            $ras = Get-RoleAssignments $ident.PrincipalId
             foreach ($ra in $ras) { Invoke-Az @('role', 'assignment', 'delete', '--ids', $ra.id) | Out-Null }
-            if ($ras.Count) { Ok "$($ras.Count) role assignment(s) of its managed identity removed" }
+            if ($ras.Count) { Ok "$($ras.Count) role assignment(s) of its managed identity $($ident.Name) removed" }
         }
     }
     Note 'deleting (can take a few minutes)...'
@@ -2035,7 +3305,9 @@ function Remove-MapResource($Def, $Found) {
 function Remove-SavedName([string]$File, $Saved, $Def) {
     $Saved.names.PSObject.Properties.Remove($Def.key)
     if ($Saved.groups) { $Saved.groups.PSObject.Properties.Remove($Def.key) }
-    foreach ($a in @($Def.size.answer, $Def.choice.answer, $Def.admin.answer) | Where-Object { $_ }) { $Saved.PSObject.Properties.Remove($a) }
+    $answers = @($Def.size.answer, $Def.choice.answer, $Def.admin.answer)
+    if (Test-SignInOn $Def) { $answers += @((Get-SignInClientIdAnswer ([string]$Def.key)), (Get-SignInObjectIdAnswer ([string]$Def.key)), (Get-SignInGroupAnswer ([string]$Def.key))) }
+    foreach ($a in @($answers | Where-Object { $_ })) { $Saved.PSObject.Properties.Remove($a) }
     [IO.File]::WriteAllText($File, (ConvertTo-Json -InputObject $Saved -Depth 10) + "`n", $utf8)
     Note "infra/environments/$(Split-Path $File -Leaf): $($Def.key) taken out"
 }
@@ -2045,13 +3317,18 @@ function Invoke-RemoveResource {
     Say 'Remove a resource from the map: everything that refers to it goes too; Azure is not changed.' 'Cyan'
     $script:namingChanged = $false
     Head 'Resource'
-    $keys = @($map.resources | Where-Object { @('group', 'name') -notcontains $_.ask } | ForEach-Object { $_.key })
+    # An app's own identity goes with its app, never on its own.
+    $keys = @($map.resources | Where-Object { @('group', 'name') -notcontains $_.ask -and -not $_.owner } | ForEach-Object { $_.key })
     foreach ($d in @($map.resources | Where-Object { $keys -contains $_.key })) { Note ("{0,-16} {1} ({2})" -f $d.key, $d.title, $d.kind) }
     if ($Key -and $keys -contains $Key) { $k = $Key; Note "resource: $Key" } else { $k = Select-Option 'Resource to remove' $keys $keys[0] }
     $def = Get-Def $k
+    $ownedDefs = @($map.resources | Where-Object { $_.owner -eq $k })
+    $goneKeys = @(@($k) + @($ownedDefs | ForEach-Object { [string]$_.key }))
     # What it is in or on (a database's server, a queue's storage account): needed to find it in Azure.
     $hostKey = [string](@($map.connections | Where-Object { $_.from -eq $k -and $_.kind -eq 'host' }) | Select-Object -First 1).to
     $on = @($map.connections | Where-Object { $_.to -eq $k -and @('host', 'origin', 'source', 'deliver') -contains $_.kind } | ForEach-Object { $_.from })
+    # A Container Apps environment or a registry stays while a container app of the map runs in it or pulls from it.
+    if (@($containerEnvType, $registryType) -contains [string]$def.armType) { $on = @(@($on) + @(Get-ContainerAppsUsing $k) | Select-Object -Unique) }
     $mirrors = @($map.resources | ForEach-Object { @($_.secrets) } | Where-Object { $_ -and $_.mirror -and $_.mirror.resource -eq $k })
     if ($on.Count -or $mirrors.Count) {
         if ($on.Count) { Missing "$k can't go while $($on -join ', ') run on it, are in it, are in front of it or take its events: remove them first" }
@@ -2062,17 +3339,27 @@ function Invoke-RemoveResource {
 
     Head 'Changes'
     Note "resource: $k ($($def.kind)) $($def.title)"
-    $pattern = '\{([^{}|]*\|)*' + [regex]::Escape($k) + '\.'
+    foreach ($od in $ownedDefs) { Note "resource: $($od.key) ($($od.kind)) $($od.title), owned by $k" }
+    $pattern = '\{([^{}|]*\|)*(' + ((@($goneKeys | ForEach-Object { [regex]::Escape($_) })) -join '|') + ')\.'
+    # The registries a removed container app pulled from (before its connections go): only their deploy role
+    # (AcrPush) is looked at again below, never another registry's.
+    $goneRegistries = @()
+    if ([string]$def.armType -eq $containerAppType) {
+        if ($def.registry) { $goneRegistries += [string]$def.registry }
+        $goneRegistries += @($map.connections | Where-Object { $_ -and $_.from -eq $k } | ForEach-Object { @(([string]$_.to).Split('|')) } | Where-Object { (Get-Def $_).armType -eq $registryType })
+        $goneRegistries = @($goneRegistries | Select-Object -Unique)
+    }
     $conns = @()
     foreach ($c in @($map.connections)) {
         $alts = @($c.to.Split('|'))
-        if ($c.from -eq $k -or ($alts -contains $k -and $alts.Count -eq 1)) { Note "connection: $($c.from) -> $($c.to) ($($c.kind))"; continue }
-        if ($alts -contains $k) { $c.to = (@($alts | Where-Object { $_ -ne $k }) -join '|'); Note "connection: $($c.from) -> $($c.to) (without $k)" }
+        $left = @($alts | Where-Object { $goneKeys -notcontains $_ })
+        if ($goneKeys -contains $c.from -or -not $left.Count) { Note "connection: $($c.from) -> $($c.to) ($($c.kind))"; continue }
+        if ($left.Count -lt $alts.Count) { $c.to = $left -join '|'; Note "connection: $($c.from) -> $($c.to) (without $k)" }
         $conns += $c
     }
     $map.connections = $conns
     foreach ($d in @($map.resources)) {
-        if ($d.key -eq $k) { continue }
+        if ($goneKeys -contains $d.key) { continue }
         if ($d.appSettings) {
             $keep = @()
             foreach ($s in @($d.appSettings)) { if ([string]$s.value -match $pattern) { Note "$($d.key): setting $($s.name) (uses $k)" } else { $keep += $s } }
@@ -2086,10 +3373,17 @@ function Invoke-RemoveResource {
         }
         if ($d.stateStorage -eq $k) { Missing "$($d.key) keeps its state in ${k}: give it another stateStorage first" }
     }
-    $map.resources = @($map.resources | Where-Object { $_.key -ne $k })
+    $map.resources = @($map.resources | Where-Object { $goneKeys -notcontains $_.key })
     $script:defs = @($map.resources)
     foreach ($p in @($map.github.variables.PSObject.Properties)) { if ([string]$p.Value -match $pattern) { $map.github.variables.PSObject.Properties.Remove($p.Name); Note "GitHub variable $($p.Name)" } }
     $map.github.deployRoles = @($map.github.deployRoles | Where-Object { $_ -and $_.resource -ne $k })
+    # The deploy role on the removed app's registry (AcrPush) goes with the last container app that deploys into it
+    # (the removed registry's own went above; other registries' roles are left as they are).
+    $unusedRegistry = { param($dr) $goneRegistries -contains [string]$dr.resource -and -not @(Get-ContainerAppsUsing ([string]$dr.resource)).Count }
+    foreach ($dr in @($map.github.deployRoles | Where-Object { $_ -and (& $unusedRegistry $_) })) {
+        Note "GitHub Actions' app registration: $($dr.role) on $($dr.resource) (no container app deploys into it any more)"
+    }
+    $map.github.deployRoles = @($map.github.deployRoles | Where-Object { $_ -and -not (& $unusedRegistry $_) })
     $map.github.tokenSecrets = @($map.github.tokenSecrets | Where-Object { $_ -and $_.resource -ne $k })
     foreach ($dm in @($map.domains | Where-Object { $_.resource -eq $k })) { Note "custom domain $($dm.answer)" }
     $map.domains = @($map.domains | Where-Object { $_.resource -ne $k })
@@ -2135,18 +3429,47 @@ function Invoke-RemoveResource {
     foreach ($f in @($envFiles | Where-Object { $wanted })) {
         $envAbbr = $f.BaseName
         $saved = Read-Json $f.FullName
+        # Its names by their rules first (this resource and its identity are out of the map by now: checked here).
+        $nameProblems = @(Get-SavedNameProblems $saved)
+        foreach ($d in @(@($def) + @($ownedDefs) | Where-Object { $_ -and $saved.names -and $saved.names.($_.key) })) {
+            $pr = Test-Name ([string]$d.type) (([string]$saved.names.($d.key)).ToLowerInvariant())
+            if ($pr) { $nameProblems += "names.$($d.key): $pr" }
+        }
+        $nameProblems = @($nameProblems | Select-Object -Unique)
+        if ($nameProblems.Count) { Missing "${envAbbr}: infra/environments/$($f.Name) holds names that break the naming rules ($($nameProblems -join '; ')): nothing deleted there; fix the file"; continue }
         $name = [string]$saved.names.$k
         $group = [string]$saved.names.resourceGroup
         if ($saved.groups -and $saved.groups.$k) { Note "${envAbbr}: $name is shared from $($saved.groups.$k): kept (another environment or project uses it)"; continue }
-        if (-not $signedIn) { Note "  ${envAbbr}: az resource delete -g $group -n $name --resource-type $($def.armType)   (check it first in the portal)"; continue }
+        # The app's own identity, deleted after it (Azure deletes nothing with the app).
+        $ownedNames = @($ownedDefs | Where-Object { $saved.names.($_.key) } | ForEach-Object { [pscustomobject]@{ Def = $_; Name = [string]$saved.names.($_.key) } })
+        if (-not $signedIn) {
+            Note "  ${envAbbr}: az resource delete -g $group -n $name --resource-type $($def.armType)   (check it first in the portal)"
+            foreach ($o in $ownedNames) { Note "  ${envAbbr}: then az identity delete -g $group -n $($o.Name)   (its identity, after its role assignments: az role assignment list --assignee <its principal id> --all)" }
+            if (Test-SignInOn $def) {
+                $savedSignIn = [string]$saved.(Get-SignInClientIdAnswer $k)
+                if (Test-Guid $savedSignIn) { Note "  ${envAbbr}: and its sign-in's app registration: az ad app delete --id $savedSignIn" }
+                else { Note "  ${envAbbr}: and its sign-in's app registration $name, once you have checked it is this app's (owners, sign-in of the deleted app): az ad app delete --id <its client id>" }
+            }
+            continue
+        }
         $script:subscription = $saved.subscriptionId
         $found = Find-MapResource $def $saved $hostKey
-        if (-not $found) { Note "${envAbbr}: $name is not in Azure (any more)"; Remove-SavedName $f.FullName $saved $def; continue }
+        if (-not $found) {
+            Note "${envAbbr}: $name is not in Azure (any more)"
+            foreach ($o in $ownedNames) {
+                if (Find-MapResource $o.Def $saved '') { Note "${envAbbr}: its identity $($o.Name) is still there with its roles: kept (-Check reports it); delete it by hand once nothing uses it (az identity delete -g $group -n $($o.Name))" }
+                Remove-SavedName $f.FullName $saved $o.Def
+            }
+            Remove-SavedName $f.FullName $saved $def
+            continue
+        }
         if (-not $found.Ours) { Note "${envAbbr}: $name was not made by the setup (no managed-by tag): kept; delete it in the portal if you are sure"; continue }
         Say ''
         Say "    DELETE FROM AZURE: $($found.Type) $name in $($found.Group) ($envAbbr, $($naming.environments.$envAbbr)). This can't be undone." 'Red'
         if ($envAbbr -eq 'prod') { Say '    THIS IS PRODUCTION: whatever uses it there stops working.' 'Red' }
-        if ($def.armType -eq 'Microsoft.Web/sites') { Note '  its managed identity''s role assignments go first' }
+        if ($def.identity -or $identityAppTypes -contains [string]$def.armType) { Note '  its managed identity''s role assignments go first' }
+        if (Test-SignInOn $def) { Note "  then its sign-in's app registration $name (asked)" }
+        foreach ($o in $ownedNames) { Note "  then its own identity $($o.Name), after the app" }
         if ($def.kind -eq 'keyVault') { Note '  a deleted vault stays recoverable for 30 days (asked: purge it)' }
         if (@('sqlDatabase', 'storage', 'storageQueue', 'serviceBus') -contains $def.kind) { Note '  ITS DATA GOES WITH IT (back it up first if you need it)' }
         $question = "To delete $name from $envAbbr, type its name exactly (anything else keeps it)"
@@ -2157,9 +3480,20 @@ function Invoke-RemoveResource {
             $typed = Read-Answer "  ${question}: " ([ordered]@{ kind = 'text'; question = $question; default = ''; danger = $true })
             if ($typed -cne 'delete prod') { Note "${envAbbr}: $name kept"; continue }
         }
-        Remove-MapResource $def $found
-        Remove-SavedName $f.FullName $saved $def
+        Remove-MapResource $def $found $saved
         Ok "${envAbbr}: $name deleted"
+        foreach ($o in $ownedNames) {
+            $ofound = Find-MapResource $o.Def $saved ''
+            if (-not $ofound) { Note "${envAbbr}: its identity $($o.Name) is not in Azure (any more)" }
+            elseif (-not $ofound.Ours) { Note "${envAbbr}: its identity $($o.Name) was not made by the setup: kept (-Check reports it); delete it by hand once nothing uses it" }
+            else {
+                Remove-MapResource $o.Def $ofound $saved
+                Ok "${envAbbr}: its identity $($o.Name) deleted"
+            }
+            Remove-SavedName $f.FullName $saved $o.Def
+        }
+        if (Test-SignInOn $def) { $idAnswer = Get-SignInClientIdAnswer $k; Remove-SignInRegistration $name ([string]$saved.$idAnswer) $idAnswer }
+        Remove-SavedName $f.FullName $saved $def
         $deleted++
     }
 
@@ -2456,7 +3790,22 @@ function Write-ImportedEnvironment($Import) {
     if ($rgDef -and $names.Contains('resourceGroup') -and $rgDef.key -ne 'resourceGroup') { $names[$rgDef.key] = $names['resourceGroup']; $names.Remove('resourceGroup') }
     $subs = [ordered]@{}
     foreach ($d in @($map.resources | Where-Object { $_.target })) { $subs[[string]$d.target] = '' }
+    # A connected container app's sign-in: the client id (and object id) it runs with, as <key>SignInClientId -
+    # the setup uses it by its id (a registration found by name only when you alone own it).
+    $ids = [ordered]@{}
+    if ($src.signInIds) {
+        foreach ($p in $src.signInIds.PSObject.Properties) {
+            $k = $p.Name
+            if ($script:keyOf -and $script:keyOf.ContainsKey($k)) { $k = $script:keyOf[$k] }
+            $d = $null
+            if ($k) { $d = Get-Def $k }
+            if (-not ($d -and (Test-SignInOn $d) -and (Test-Guid ([string]$p.Value.clientId)))) { continue }
+            $ids[(Get-SignInClientIdAnswer $k)] = [string]$p.Value.clientId
+            if (Test-Guid ([string]$p.Value.objectId)) { $ids[(Get-SignInObjectIdAnswer $k)] = [string]$p.Value.objectId }
+        }
+    }
     if ($old) {
+        foreach ($a in $ids.Keys) { if (-not $old.$a) { Set-Prop $old $a $ids[$a] } }
         # Into saved answers: the imported resources' names (and groups, sub names) only.
         $added = @()
         if (-not $old.names) { Set-Prop $old 'names' ([pscustomobject]@{}) }
@@ -2480,6 +3829,7 @@ function Write-ImportedEnvironment($Import) {
     $answers.subs = $subs
     $answers.names = $names
     $answers.groups = $groups
+    foreach ($a in $ids.Keys) { $answers[$a] = $ids[$a] }
     New-Item -ItemType Directory -Force -Path (Split-Path $file) | Out-Null
     [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $answers -Depth 10) + "`n", (New-Object Text.UTF8Encoding $false))
     Ok "infra/environments/$envName.json written: the real names of $envName (its first dry run asks every question once with them)"
@@ -2678,6 +4028,13 @@ function Invoke-Setup {
     $script:secrets = @{}
     $script:subs = [ordered]@{}
     $script:currentDef = $null
+    $script:identities = @{}
+    $script:oldIdentities = @()
+    $script:oldSqlUsers.Clear()
+    $script:lackingSecrets = @{} # container apps' missing Key Vault secrets (key -> @{ Vault; Secret; Ref })
+    $imageUnknown = @()
+    $signInPassed = @{}
+    $paramsFile = $null
 
     Head 'Environment'
     $envs = @($naming.environments.PSObject.Properties | ForEach-Object { $_.Name })
@@ -2708,6 +4065,7 @@ function Invoke-Setup {
     $envFile = Join-Path $infra "environments\$envAbbr.json"
     $script:saved = Read-Json $envFile
     $saved = $script:saved
+    Assert-SavedNames $saved "infra/environments/$envAbbr.json"
     $script:fromCopy = $false # answers of another environment, not saved for this one yet
     $script:copyBranch = ''
     if ($script:ui) { Send ([ordered]@{ t = 'env'; env = $envAbbr; ghEnv = $ghEnv; saved = [bool]$saved }) }
@@ -2722,6 +4080,7 @@ function Invoke-Setup {
                 $script:saved = Copy-Answers (Read-Json (Join-Path $infra "environments\$from.json")) $from $envAbbr
                 $script:fromCopy = $true
                 $saved = $script:saved
+                Assert-SavedNames $saved "infra/environments/$from.json"
                 Note "defaults from infra/environments/$from.json, moved to ${envAbbr}: names, custom domains and the deploy branch with $envAbbr instead of $from (each still asked); shared resources kept"
             }
         }
@@ -2816,6 +4175,14 @@ function Invoke-Setup {
         if ($saved -and $null -ne $saved.($mv.answer)) { $default = [string]$saved.($mv.answer) }
         $script:choices[$mv.answer] = Ask "$($mv.label) (for $envAbbr)" $default
     }
+    # The sign-in in front of container apps: who may sign in here, and its app registration's client id.
+    foreach ($def in @(Get-SignInDefs)) { if ($script:res[$def.key] -and $script:res[$def.key].Name) { Read-SignIn $def } }
+    # GitHub Actions' app registration by its saved client id (step 2 saves it), kept with the answers.
+    $deployKeyDef = $defs | Where-Object { $_.ask -eq 'name' -and $_.type -eq 'deploy' } | Select-Object -First 1
+    if ($deployKeyDef) {
+        $deployIdAnswer = Get-DeployClientIdAnswer ([string]$deployKeyDef.key)
+        if ($saved -and $saved.$deployIdAnswer) { $script:choices[$deployIdAnswer] = [string]$saved.$deployIdAnswer }
+    }
 
     Head 'GitHub'
     $haveGh = $ghExe -and (Test-Gh @('auth', 'status'))
@@ -2908,7 +4275,13 @@ function Invoke-Setup {
     if ($script:mode -ne 'check') { $script:auto = $false } # questions from here on (DNS) are asked again
 
     Head '1. Azure resources'
-    foreach ($ns in @($map.providers)) {
+    # The map's providers, and those the Container Apps kinds and the apps' identities need when the map has them.
+    $providers = @($map.providers | Where-Object { $_ })
+    foreach ($d in $defs) {
+        $ns = ([string]$d.armType).Split('/')[0]
+        if ($usedProviders -contains $ns -and $providers -notcontains $ns) { $providers += $ns }
+    }
+    foreach ($ns in $providers) {
         if ((Invoke-Az @('provider', 'show', '-n', $ns, '--query', 'registrationState')) -eq 'Registered') { continue }
         if (Confirm-Step "Register the resource provider $ns (once per subscription)?") {
             Invoke-Az @('provider', 'register', '-n', $ns, '--wait') | Out-Null
@@ -2929,6 +4302,15 @@ function Invoke-Setup {
     $appDefs = @($defs | Where-Object { $appTypes -contains $_.armType })
     if ($haveRg) {
         foreach ($def in $appDefs) { if ($script:res[$def.key].Found) { $script:apps[$def.key] = Get-App $def.key } }
+        # An app that still signs in as its system-assigned identity (connected by an import, or made by an older
+        # map) gets its own identity from the template, which switches the app to it; Azure then deletes the old
+        # identity and leaves its role assignments behind as "unknown". What the old one has is read now (while
+        # it is known) and listed in the next steps, to remove by hand once the app works with its own.
+        $script:oldIdentities = @(foreach ($def in @($appDefs | Where-Object { $_.identity })) {
+                $app = $script:apps[$def.key]
+                if (-not ($app -and $app.identity -and [string]$app.identity.type -match 'SystemAssigned' -and $app.identity.principalId)) { continue }
+                [pscustomobject]@{ App = [string]$app.name; Identity = [string]$script:res[[string]$def.identity].Name; PrincipalId = [string]$app.identity.principalId; Assignments = @(Get-RoleAssignments ([string]$app.identity.principalId)) }
+            })
         $changes = @()
         $later = @()
 
@@ -2944,11 +4326,13 @@ function Invoke-Setup {
             $vaultId = "/subscriptions/$subscription/resourceGroups/$vaultGroup/providers/$($vdef.armType)/$($vres.Name)"
             if ($vres.Found) { $vaultId = $vres.Found.id }
             foreach ($sec in @($vdef.secrets | Where-Object { $_.by -eq 'setup' })) {
+                if (-not (Test-SecretName ([string]$sec.name))) { Missing "$($vdef.key): secret name $($sec.name) refused (letters, digits and -, up to 127)"; continue }
                 $inVault = [bool](Try-Az @('resource', 'show', '--ids', "$vaultId/secrets/$($sec.name)"))
                 $fromVault = $null
                 if ($inVault) { $fromVault = Try-Az @('keyvault', 'secret', 'show', '--vault-name', $vres.Name, '--name', $sec.name, '--query', 'value') }
                 $fromMirror = $null
                 if ($sec.mirror -and $script:res[$sec.mirror.resource].Found) { $fromMirror = (Get-AppSettings $sec.mirror.resource)[$sec.mirror.setting] }
+                if ($fromMirror -and $fromMirror.StartsWith($secretRefMark)) { $fromMirror = $null } # a container app's secret reference, not a value
                 $kept = $fromMirror
                 if (-not $kept) { $kept = $fromVault }
                 $writeSecret = (-not $inVault) -or (-not $kept) -or ($fromVault -and $fromVault -ne $kept)
@@ -2991,6 +4375,43 @@ function Invoke-Setup {
             $params[$dm.param] = $value
         }
         foreach ($mv in @($map.values | Where-Object { $_ -and $_.param })) { $params[$mv.param] = [string]$script:choices[$mv.answer] }
+        # Container apps: the image Azure runs now ('' = the placeholder: a new app, or one still on it), so the template
+        # never changes it; a first image comes in the step "First image" (after the sign-in and GitHub). The saved
+        # sign-in client id, always ('' = no authConfigs and the placeholder stays: fail-closed; the step "Sign-in app
+        # registrations" makes the app registration, then main.bicep runs again).
+        $imageUnknown = @()
+        $signInPassed = @{}
+        foreach ($def in @($defs | Where-Object { $_.armType -eq $containerAppType })) {
+            $cname = [string]$script:res[$def.key].Name
+            if (-not $cname) { continue }
+            $clientId = ''
+            if (Test-SignInOn $def) {
+                $clientId = [string]$script:choices[(Get-SignInClientIdAnswer $def.key)]
+                $params["$($def.key)SignInClientId"] = $clientId
+                $signInPassed[$def.key] = $clientId
+                if (-not $clientId) { Note "${cname}: no sign-in yet (its app registration comes after step 1; then main.bicep runs again)" }
+            }
+            $image = Get-ImageParam $def.key
+            # The sign-in's paths: never the whole app without sign-in (infra/generate.ps1 refuses it too).
+            $pathProblem = ''
+            if (Test-SignInOn $def) { $pathProblem = Get-SignInPathProblem $def }
+            if ($pathProblem) {
+                $imageUnknown += $cname
+                Missing "${cname}: $pathProblem - the template isn't deployed"
+            }
+            if ($null -eq $image) {
+                $imageUnknown += $cname
+                Missing "${cname}: its image can't be read (az containerapp show): the template isn't deployed, it would put the placeholder back"
+                $image = ''
+            } elseif ($image -and (Test-SignInUnknown $def)) {
+                # Its own image runs, but no sign-in registration is known (none saved, none in Azure's sign-in, none
+                # yours alone by its name): the template would go out without the sign-in in front of it.
+                $imageUnknown += $cname
+                Missing "${cname}: the app runs its image but its sign-in registration is unknown - set $(Get-SignInClientIdAnswer $def.key) in infra/environments/$envAbbr.json (the template isn't deployed)"
+            } elseif ($image) { Note "${cname}: image $image (kept; the app's workflow deploys a new one)" }
+            else { Note "${cname}: image $placeholderImage (placeholder; its first image comes in the step First image)" }
+            $params["$($def.key)Image"] = $image
+        }
         # What waits for an app's code (an Event Grid subscription: Azure checks its function): made once the
         # function is there, so the first start (before the app's deploy) leaves it for the next one.
         foreach ($def in @($defs | Where-Object { $_.ready -and $_.ready.param })) {
@@ -3029,11 +4450,13 @@ function Invoke-Setup {
         # setting there; the values the map expects where they are known here).
         foreach ($def in @($defs | Where-Object { $_.appSettings })) {
             if (-not $script:res[$def.key].Found) { continue }
-            if ($def.armType -eq 'Microsoft.Web/sites' -and -not $script:apps[$def.key]) { continue }
+            if (@('Microsoft.Web/sites', $containerAppType) -contains [string]$def.armType -and -not $script:apps[$def.key]) { continue }
             $have = Get-AppSettings $def.key
             $wrong = @()
-            foreach ($s in @($def.appSettings)) {
+            foreach ($s in @(Get-ExpectedSettings $def)) {
                 $value = $have[$s.name]
+                # A container app's Key Vault secret is a secret reference: there by name, its value never read.
+                if ($def.armType -eq $containerAppType -and $value -and $value.StartsWith($secretRefMark)) { continue }
                 # value: the whole setting; prefix: how it starts (never $s.equals: that is the object's method)
                 $expect = [string]$s.value
                 if (-not $expect) { $expect = [string]$s.prefix }
@@ -3057,17 +4480,60 @@ function Invoke-Setup {
             }
             $plural = ''
             if ($changes.Count -gt 1) { $plural = 's' }
-            if (Confirm-Step "Deploy infra/$($map.project.template) ($($changes.Count) change$plural, a few minutes)?") {
+            if ($imageUnknown.Count) { Missing "infra/$($map.project.template) not deployed: $((@($imageUnknown | Select-Object -Unique)) -join ', ') (above: an image that can't be read, a sign-in registration that is unknown, or a sign-in path)"; $templatePending = $true }
+            elseif (Confirm-Step "Deploy infra/$($map.project.template) ($($changes.Count) change$plural, a few minutes)?") {
                 Invoke-Az (@('deployment', 'group', 'create') + $deployment) | Out-Null
                 Ok "infra/$($map.project.template) deployed"
                 foreach ($def in $defs) { $res = $script:res[$def.key]; if ($res.Name -and -not $res.Group -and -not $res.Found -and $def.ask -ne 'name' -and $def.ask -ne 'group') { Mark $def.key $res.Name 'created' '' } }
             } else { Missing "resources differ from the template ($($changes.Count) changes)"; $templatePending = $true }
         }
         foreach ($def in $appDefs) { $script:apps[$def.key] = Get-App $def.key }
+        # The apps' identities: one owner each, no one else may attach them (reported only).
+        Test-AppIdentities
         # Just created: now every value is known.
         if ($changes.Count -and @($map.domains | Where-Object { $script:choices[$_.answer] -ne '-' -and -not $script:res[$_.resource].Found -and $script:apps[$_.resource] }).Count) {
             Write-DnsInstructions 'DNS for the custom domains, all values (step 4 checks it and adds the domains):' (Get-DnsRecords)
         }
+        # Container apps: the Key Vault secrets they reference (names only; the next steps say how to put them in).
+        foreach ($def in @($appDefs | Where-Object { $_.armType -eq $containerAppType })) {
+            $lack = @(Test-ContainerAppSecrets $def.key)
+            if ($lack.Count) { $script:lackingSecrets[$def.key] = $lack }
+        }
+    }
+
+    # The sign-in in front of container apps: the app registration once the app (and its address) exists, then
+    # main.bicep again when its client id is new, so the sign-in (authConfigs) is there before the app's workflow
+    # deploys its real image - all in this start.
+    $signInDefs = @(Get-SignInDefs | Where-Object { $script:res[$_.key] -and $script:res[$_.key].Name })
+    if ($signInDefs.Count) {
+        Head 'Sign-in app registrations'
+        $redeploy = @()
+        foreach ($def in $signInDefs) {
+            $idAnswer = Get-SignInClientIdAnswer $def.key
+            $clientId = [string](@(Set-SignInApp $def) | Select-Object -Last 1)
+            if ($clientId -and $clientId -ne [string]$script:choices[$idAnswer]) { $script:choices[$idAnswer] = $clientId }
+            # Saved with its object id: the next run uses them, never a registration found by its name.
+            if ($clientId) {
+                Save-EnvAnswer $envFile $idAnswer $clientId
+                $objAnswer = Get-SignInObjectIdAnswer $def.key
+                if ($script:choices[$objAnswer]) { Save-EnvAnswer $envFile $objAnswer ([string]$script:choices[$objAnswer]) }
+            }
+            if ($clientId -and $signInPassed -and $signInPassed.ContainsKey($def.key) -and [string]$signInPassed[$def.key] -ne $clientId) { $redeploy += $def }
+        }
+        if ($redeploy.Count) {
+            $signInNames = (@($redeploy | ForEach-Object { $script:res[$_.key].Name })) -join ', '
+            if ($script:readOnly -or -not $paramsFile) { Missing "sign-in of ${signInNames}: main.bicep runs again with its client id (authConfigs; a start does it)" }
+            else {
+                $values = @{}
+                foreach ($def in $redeploy) { $values["$($def.key)SignInClientId"] = [string]$script:choices[(Get-SignInClientIdAnswer $def.key)] }
+                if ($imageUnknown.Count) { Missing "sign-in of ${signInNames}: not deployed (held back above: $((@($imageUnknown | Select-Object -Unique)) -join ', '))"; $templatePending = $true }
+                elseif (Invoke-TemplateAgain $parameters $values $deployment $declared "Deploy infra/$($map.project.template) again so the sign-in is in front of $signInNames (a minute)?") {
+                    Ok "infra/$($map.project.template) deployed: sign-in in front of $signInNames"
+                    foreach ($def in $redeploy) { $script:apps[$def.key] = Get-App $def.key }
+                } else { Missing "sign-in of ${signInNames}: not in front of the app yet (run a start again)"; $templatePending = $true }
+            }
+        }
+        foreach ($def in $signInDefs) { Test-SignInLive $def ([string]$script:choices[(Get-SignInClientIdAnswer $def.key)]) }
     }
 
     # The apps' database users (the map's "sql" connections).
@@ -3083,32 +4549,61 @@ function Invoke-Setup {
     Head '2. GitHub -> Azure trust (OIDC)'
     $deployDef = $defs | Where-Object { $_.ask -eq 'name' -and $_.type -eq 'deploy' } | Select-Object -First 1
     $deployApp = $script:res[$deployDef.key].Name
-    $entra = @(Invoke-Az @('ad', 'app', 'list', '--display-name', $deployApp)) | Where-Object { $_ } | Select-Object -First 1
-    if ($entra) { Ok "app registration $deployApp ($($entra.appId))"; Mark $deployDef.key $deployApp 'ours' '' }
-    elseif (Confirm-Step "Create the app registration $deployApp (GitHub Actions signs in as it)?") {
+    # By its saved client id; by its name only when none is saved and you alone own it (Resolve-EntraApp): whoever
+    # owns the registration GitHub Actions signs in as controls what it may change in Azure.
+    $deployIdAnswer = Get-DeployClientIdAnswer ([string]$deployDef.key)
+    $deployFound = Resolve-EntraApp $deployApp ([string]$script:choices[$deployIdAnswer]) $deployIdAnswer
+    $entra = $deployFound.App
+    if ($deployFound.Note) { Note $deployFound.Note }
+    if ($deployFound.Problem) { Missing "app registration ${deployApp}: $($deployFound.Problem)"; Mark $deployDef.key $deployApp 'new' '' }
+    elseif ($entra) {
+        Ok "app registration $deployApp ($($entra.appId)$(if ($deployFound.Source -eq 'name') { ', by its name: you alone own it' }))"
+        Mark $deployDef.key $deployApp 'ours' ''
+        if ($deployFound.Source -eq 'id') {
+            $owners = Get-EntraOwners 'app' ([string]$entra.appId)
+            if (-not (Test-OwnedByOperator $owners)) { Missing "app registration ${deployApp}: owners $(Get-OwnersText $owners) (only you should own it)" }
+        }
+    } elseif (-not (Get-OperatorId)) { Missing "app registration ${deployApp}: made only by a signed-in user (az ad signed-in-user show), its owner"; Mark $deployDef.key $deployApp 'new' '' }
+    elseif (Confirm-Step "Create the app registration $deployApp (GitHub Actions signs in as it; you its only owner)?") {
         $entra = Invoke-Az @('ad', 'app', 'create', '--display-name', $deployApp)
+        if (-not (Test-OwnedByOperator (Get-EntraOwners 'app' ([string]$entra.appId)))) { Invoke-Az @('ad', 'app', 'owner', 'add', '--id', [string]$entra.appId, '--owner-object-id', (Get-OperatorId)) | Out-Null }
         Ok "app registration $deployApp created ($($entra.appId))"
         Mark $deployDef.key $deployApp 'created' ''
     } else { Missing "app registration $deployApp"; Mark $deployDef.key $deployApp 'new' '' }
-    if ($entra) { $script:vals["$($deployDef.key).appId"] = $entra.appId }
+    if ($entra) {
+        $script:vals["$($deployDef.key).appId"] = $entra.appId
+        $script:choices[$deployIdAnswer] = [string]$entra.appId
+        Save-EnvAnswer $envFile $deployIdAnswer ([string]$entra.appId)
+    }
 
     $principal = $null
+    $deployRefused = $false
     if ($entra) {
-        $principal = Try-Az @('ad', 'sp', 'show', '--id', $entra.appId)
-        if ($principal) { Ok 'service principal' }
-        elseif (Confirm-Step 'Create its service principal?') {
-            $principal = Invoke-Az @('ad', 'sp', 'create', '--id', $entra.appId)
-            Ok 'service principal created'
-        } else { Missing 'service principal' }
+        $gate = Get-DeployPrincipal $entra $deployApp
+        $principal = $gate.Principal
+        $deployRefused = $gate.Refused
 
         # The subject GitHub puts in its token: with immutable ids ('repo:owner@123/name@456:...') when the
         # repository uses them (seen on the first deploy: AADSTS700213 with the name-only one), else
         # 'repo:owner/name:...'. GitHub reports its prefix; both forms are trusted, so either works.
         $subjects = @("repo:${repo}:environment:$ghEnv")
+        $oidc = $null
         if ($haveGh) {
             $oidc = Try-Gh @('api', "repos/$repo/actions/oidc/customization/sub") -Json
             if ($oidc -and $oidc.sub_claim_prefix -and "$($oidc.sub_claim_prefix):environment:$ghEnv" -ne $subjects[0]) { $subjects += "$($oidc.sub_claim_prefix):environment:$ghEnv" }
         } else { Note "without the GitHub CLI only the name-based subject is known; if the deploy's Azure login fails with AADSTS700213, add the subject it names here" }
+        # Trust it has besides GitHub Actions of this repository's environments (the map's, both subject forms):
+        # reported, never removed here; a client secret or certificate noted (the deploy signs in with OIDC).
+        $ourSubjects = @(foreach ($e in @($naming.environments.PSObject.Properties | ForEach-Object { [string]$_.Value } | Where-Object { $_ })) {
+                "repo:${repo}:environment:$e"
+                if ($oidc -and $oidc.sub_claim_prefix) { "$($oidc.sub_claim_prefix):environment:$e" }
+            })
+        $foreign = Get-ForeignCredentials $entra $ourSubjects
+        if ($null -eq $foreign) { Missing "${deployApp}: its federated credentials are not readable (az ad app federated-credential list --id $($entra.appId))" }
+        foreach ($fc in @($foreign)) {
+            if ($fc.Kind -eq 'federated') { Missing "${deployApp}: a $($fc.Text) - not GitHub Actions of $repo in this map's environments" }
+            else { Note "${deployApp}: has a $($fc.Text) (the deploy signs in with OIDC: is it still needed?)" }
+        }
         $existing = @(Invoke-Az @('ad', 'app', 'federated-credential', 'list', '--id', $entra.appId)) | Where-Object { $_ }
         for ($i = 0; $i -lt $subjects.Count; $i++) {
             $subject = $subjects[$i]
@@ -3124,21 +4619,23 @@ function Invoke-Setup {
     }
 
     # The role GitHub Actions' app registration needs on each app it deploys (the map's deployRoles).
-    foreach ($deployRole in @($map.github.deployRoles)) {
-        $roleTarget = $script:apps[$deployRole.resource]
+    # An app (App Service, Container App: Website Contributor, Container Apps Contributor) or what it deploys into
+    # (a container registry: AcrPush), each at its own scope only.
+    foreach ($deployRole in @($map.github.deployRoles | Where-Object { $_ })) {
+        $roleTargetId = Get-ResourceId ([string]$deployRole.resource)
         $roleTargetName = $script:res[$deployRole.resource].Name
-        if (-not ($principal -and $roleTarget)) { continue }
+        if (-not ($principal -and $roleTargetId)) { continue }
         $role = [string]$deployRole.role
-        if (@(Invoke-Az @('role', 'assignment', 'list', '--assignee', $principal.id, '--scope', $roleTarget.id, '--role', $role)) | Where-Object { $_ }) { Ok "$role on $roleTargetName" }
+        if (@(Invoke-Az @('role', 'assignment', 'list', '--assignee', $principal.id, '--scope', $roleTargetId, '--role', $role)) | Where-Object { $_ }) { Ok "$role on $roleTargetName" }
         elseif (Confirm-Step "Let $deployApp deploy to $roleTargetName ($role)?") {
-            Invoke-Az @('role', 'assignment', 'create', '--assignee-object-id', $principal.id, '--assignee-principal-type', 'ServicePrincipal', '--role', $role, '--scope', $roleTarget.id) | Out-Null
+            Invoke-Az @('role', 'assignment', 'create', '--assignee-object-id', $principal.id, '--assignee-principal-type', 'ServicePrincipal', '--role', $role, '--scope', $roleTargetId) | Out-Null
             Ok "$role on $roleTargetName assigned"
         } else { Missing "$role on $roleTargetName" }
     }
 
     # The deploys that run migrations: the app registration's database user (it changes the schema).
     $migrating = @(Get-MigratingDeploys)
-    if ($migrating.Count -and $entra) {
+    if ($migrating.Count -and $entra -and -not $deployRefused) {
         try { foreach ($dbKey in @($migrating | ForEach-Object { $_.Database } | Select-Object -Unique)) { Grant-DeployDatabaseUser $dbKey $deployApp $entra.appId } }
         finally { Close-SqlFirewall }
     }
@@ -3274,6 +4771,43 @@ function Invoke-Setup {
         Missing "GitHub environment $ghEnv not checked (no GitHub CLI)"
     }
 
+    # A container app still on the placeholder gets its first image here, in this start: after its sign-in (step
+    # "Sign-in app registrations") and GitHub (its workflow signs in with the trust and the environment's variables).
+    # Its workflow runs with push-only, then main.bicep deploys the pushed image with the app's settings, secrets and
+    # probes; every later run of the workflow changes the image by itself.
+    $firstDefs = @($defs | Where-Object { $_.armType -eq $containerAppType -and $_.deploy -and $_.deploy.workflow -and $script:apps[$_.key] -and (Test-PlaceholderImage (Get-AppImage $script:apps[$_.key])) })
+    if ($firstDefs.Count) {
+        Head 'First image (container apps)'
+        foreach ($def in $firstDefs) {
+            $cname = [string]$script:res[$def.key].Name
+            $wf = [string]$def.deploy.workflow
+            $clientId = [string]$script:choices[(Get-SignInClientIdAnswer $def.key)]
+            if ((Test-SignInOn $def) -and -not (Test-SignInReady $def $clientId)) { Missing "${cname}: its first image waits for the sign-in in front of it (above)"; continue }
+            $lack = @(Get-MissingMapSecrets $def)
+            if ($lack.Count) {
+                $script:lackingSecrets[$def.key] = $lack
+                Missing "${cname}: its first image waits for its Key Vault secrets ($((@($lack | ForEach-Object { "$($_.Vault)/$($_.Secret)" })) -join ', '); the next steps say how)"
+                continue
+            }
+            if ($script:readOnly) { Missing "${cname}: still the placeholder (a start runs $wf with push-only and deploys its image)"; continue }
+            if (-not $haveGh -or -not $paramsFile -or $imageUnknown.Count) { Missing "${cname}: still the placeholder (run $wf with push-only, then start again)"; continue }
+            if (-not (Confirm-Step "Give $cname its first image: run $wf with push-only on $(if ($branch -ne '-') { $branch } else { 'the default branch' }) (a few minutes), then deploy it with main.bicep?")) { Missing "${cname}: still the placeholder"; continue }
+            $image = Invoke-FirstImageBuild $def $repo $branch $ghEnv
+            if (-not $image) { continue }
+            # Checked again right before the deploy (the build took minutes): the real image brings its secret references.
+            $lack = @(Get-MissingMapSecrets $def)
+            if ($lack.Count) {
+                $script:lackingSecrets[$def.key] = $lack
+                Missing "${cname}: $image is pushed, not deployed: its Key Vault secrets are missing ($((@($lack | ForEach-Object { "$($_.Vault)/$($_.Secret)" })) -join ', ')); put them in, then start again"
+                continue
+            }
+            if (Invoke-TemplateAgain $parameters @{ "$($def.key)Image" = $image } $deployment $declared "Deploy infra/$($map.project.template) with $image for $cname (its first image, with its settings)?") {
+                Ok "${cname}: first image $image deployed"
+                $script:apps[$def.key] = Get-App $def.key
+            } else { Missing "${cname}: still the placeholder ($image is pushed: start again)"; $templatePending = $true }
+        }
+    }
+
     Head '4. Custom domains'
     $script:domainReady = @{}
     $script:domainsToAdd = $false # DNS is there, the domain not added yet (a dry run or check doesn't add it)
@@ -3286,11 +4820,25 @@ function Invoke-Setup {
 
     Head '5. Live'
     $allLive = $true
+    # Container apps start with the placeholder: their own image comes with their workflow.
+    $placeholderApps = @()
+    foreach ($def in @($defs | Where-Object { $_.armType -eq $containerAppType })) {
+        $app = $script:apps[$def.key]
+        if (-not $app) { continue }
+        $cname = [string]$script:res[$def.key].Name
+        $image = Get-AppImage $app
+        $workflow = 'its deploy workflow'
+        if ($def.deploy -and $def.deploy.workflow) { $workflow = ".github/workflows/$($def.deploy.workflow)" }
+        if (Test-PlaceholderImage $image) {
+            Missing "$cname still runs the placeholder image: a start gives it its first image (step First image), or run $workflow with push-only (environment $ghEnv), then start again"
+            $placeholderApps += $def
+        } else { Ok "$cname runs $image" }
+    }
     foreach ($lv in @($map.live)) {
         $app = $script:apps[$lv.resource]
         $live = $false
         if (-not $app) { Missing "$($lv.what): not created yet"; $allLive = $false; continue }
-        $bases = @("https://$($app.defaultHostName)")
+        $bases = @("https://$(Get-AppHost $app)")
         if ($lv.domain -and $script:domainReady[$lv.domain]) { $bases += "https://$($script:choices[$lv.domain])" }
         foreach ($base in $bases) {
             if ($lv.kind -eq 'health') {
@@ -3395,6 +4943,7 @@ function Invoke-Setup {
     }
     # The secrets put in by hand (e.g. API keys of other services): the app's settings already point at them
     # (main.bicep); until they are there the app treats them as not set.
+    $listedSecrets = @{} # vault/secret already in a step
     foreach ($vdef in @($defs | Where-Object { $_.handSecrets })) {
         $hs = $vdef.handSecrets
         if (-not $script:apps[$hs.restart]) { continue }
@@ -3402,16 +4951,17 @@ function Invoke-Setup {
         $vaultGroupName = $rgName
         if ($vres.Group) { $vaultGroupName = $vres.Group }
         $vaultResource = "/subscriptions/$subscription/resourceGroups/$vaultGroupName/providers/$($vdef.armType)/$($vres.Name)"
-        $missingKeys = @($vdef.secrets | Where-Object { $_.by -eq 'hand' -and -not (Try-Az @('resource', 'show', '--ids', "$vaultResource/secrets/$($_.name)")) })
+        $missingKeys = @($vdef.secrets | Where-Object { $_.by -eq 'hand' -and (Test-SecretName ([string]$_.name)) -and -not (Try-Az @('resource', 'show', '--ids', "$vaultResource/secrets/$($_.name)")) })
         if (-not $missingKeys.Count) { continue }
         $lines = @()
         foreach ($k in $missingKeys) {
-            $placeholder = '"<' + $k.label + '>"'
-            $lines += "az keyvault secret set --vault-name $($vres.Name) --name $($k.name) --value $placeholder"
+            $lines += "az keyvault secret set --vault-name $($vres.Name) --name $($k.name) --file <a file only you can read, holding $($k.label)> --encoding utf-8"
             $lines += "  $($k.what); $($hs.reader) reads it as $($k.setting)"
         }
-        $lines += "az webapp restart -g $rgName -n $($script:res[$hs.restart].Name)"
-        $lines += "  $($hs.reader) reads Key Vault references when it starts (portal: $($hs.reader) -> Environment variables -> Pull reference values)"
+        foreach ($k in $missingKeys) { $listedSecrets["$($vres.Name)/$($k.name)".ToLower()] = $true }
+        $lines += Get-RestartCommand ([string]$hs.restart)
+        if ((Get-Def ([string]$hs.restart)).armType -eq $containerAppType) { $lines += "  $($hs.reader) reads its Key Vault secrets when its revision starts (a new version within about 30 minutes by itself)" }
+        else { $lines += "  $($hs.reader) reads Key Vault references when it starts (portal: $($hs.reader) -> Environment variables -> Pull reference values)" }
         if ($hs.after) { $lines += $hs.after }
         Add-Step (Expand $hs.title) $hs.where $lines
     }
@@ -3424,22 +4974,80 @@ function Invoke-Setup {
         if ($vres.Group) { $vaultGroupName = $vres.Group }
         $vaultResource = "/subscriptions/$subscription/resourceGroups/$vaultGroupName/providers/$($vdef.armType)/$($vres.Name)"
         if (-not (Try-Az @('resource', 'show', '--ids', $vaultResource))) { continue }
-        $missingKeys = @($vdef.secrets | Where-Object { $_ -and $_.by -eq 'hand' -and -not (Try-Az @('resource', 'show', '--ids', "$vaultResource/secrets/$($_.name)")) })
+        $missingKeys = @($vdef.secrets | Where-Object { $_ -and $_.by -eq 'hand' -and (Test-SecretName ([string]$_.name)) -and -not (Try-Az @('resource', 'show', '--ids', "$vaultResource/secrets/$($_.name)")) })
         if (-not $missingKeys.Count) { continue }
         $lines = @()
         foreach ($k in $missingKeys) {
-            $lines += "az keyvault secret set --vault-name $($vres.Name) --name $($k.name) --value `"<$($k.label)>`""
+            $lines += "az keyvault secret set --vault-name $($vres.Name) --name $($k.name) --file <a file only you can read, holding $($k.label)> --encoding utf-8"
             $lines += "  $($k.what): $($k.app) reads it as $($k.setting)"
         }
+        foreach ($k in $missingKeys) { $listedSecrets["$($vres.Name)/$($k.name)".ToLower()] = $true }
         foreach ($a in @($missingKeys | ForEach-Object { [string]$_.app } | Where-Object { $_ } | Select-Object -Unique)) {
             $ad = Get-Def $a
             if (-not $ad -or -not $script:res[$a] -or -not $script:res[$a].Name) { continue }
-            $cmd = 'webapp'
-            if ($ad.kind -eq 'functionApp') { $cmd = 'functionapp' }
-            $lines += "az $cmd restart -g $rgName -n $($script:res[$a].Name)"
+            # A container app that doesn't exist yet reads them when it is created.
+            if ($ad.armType -eq $containerAppType -and -not $script:apps[$a]) { continue }
+            $lines += Get-RestartCommand $a
         }
-        $lines += '  the apps read Key Vault references when they start (until then a missing secret is an empty setting)'
+        $lines += '  the apps read Key Vault references when they start (until then a missing secret is an empty setting; a container app''s revision does not start without it)'
         Add-Step "Put the apps' secrets into $($vres.Name)" "https://portal.azure.com/#@/resource$vaultResource/secrets" $lines
+    }
+    # Key Vault secrets a container app references that no step above lists (its secrets in Azure, by name).
+    $containerLines = @()
+    foreach ($appKey in @($script:lackingSecrets.Keys)) {
+        $todo = @($script:lackingSecrets[$appKey] | Where-Object { -not $listedSecrets["$($_.Vault)/$($_.Secret)".ToLower()] })
+        if (-not $todo.Count) { continue }
+        foreach ($t in $todo) {
+            $containerLines += "az keyvault secret set --vault-name $($t.Vault) --name $($t.Secret) --file <a file only you can read> --encoding utf-8"
+            $containerLines += "  for $($script:res[$appKey].Name) ($($t.Ref)); delete the file afterwards (--value would show the secret in the process list and the shell history)"
+        }
+        $containerLines += Get-RestartCommand $appKey
+    }
+    if ($containerLines.Count) {
+        $containerLines += '  a container app reads its Key Vault secrets when its revision starts: its first image waits for them.'
+        $containerLines += "Then start again: .\infra\azure-setup.ps1 -Start -Environment $envAbbr (step First image deploys it)."
+        Add-Step "Put the container apps' Key Vault secrets in" 'this PowerShell window (az), signed in with Key Vault Secrets Officer on the vault' $containerLines
+    } elseif ($script:lackingSecrets.Count) {
+        # Their secrets are listed in a step above: the first image follows with the next start.
+        Add-Step 'Give the container apps their first image' 'this PowerShell window (repository root)' @(
+            "Once the secrets above are in: .\infra\azure-setup.ps1 -Start -Environment $envAbbr (step First image deploys it).")
+    }
+    # The container apps still on the placeholder: their workflow builds and deploys their own image (after the sign-in
+    # in front of them and their Key Vault secrets).
+    if ($placeholderApps.Count) {
+        $lines = @()
+        foreach ($def in $placeholderApps) {
+            $wf = 'its deploy workflow'
+            if ($def.deploy -and $def.deploy.name) { $wf = "`"$($def.deploy.name)`"" }
+            elseif ($def.deploy -and $def.deploy.workflow) { $wf = "`"$($def.deploy.workflow)`"" }
+            $registryName = ''
+            if ($def.registry -and $script:res[[string]$def.registry]) { $registryName = " to $($script:res[[string]$def.registry].Name)" }
+            $lines += "Actions -> $wf -> Run workflow -> environment $ghEnv, push-only$(if ($branch -ne '-') { ", on $branch" })"
+            $lines += "  builds the image of $($script:res[$def.key].Name) and pushes it$registryName"
+        }
+        if (@($placeholderApps | Where-Object { Test-SignInOn $_ }).Count) { $lines += 'An app with sign-in gets its image only once the sign-in is in front of it (a start makes it).' }
+        $lines += "Then .\infra\azure-setup.ps1 -Start -Environment $envAbbr deploys the pushed image with the app's settings (step First image does both"
+        $lines += 'when asked); every later run of the workflow deploys the new image by itself. -Check then shows each app on its own image.'
+        Add-Step 'Deploy the container apps (they still run the placeholder)' "https://github.com/$repo/actions" $lines
+    }
+    # An app switched (or being switched) from its system-assigned identity to its own: what the old one was given,
+    # removed by hand once the app works with its own identity (never by the setup: the app may still need it).
+    $oldApps = @(@($script:oldIdentities | ForEach-Object { $_.App }) + @($script:oldSqlUsers | ForEach-Object { $_.App }) | Where-Object { $_ } | Select-Object -Unique)
+    foreach ($a in $oldApps) {
+        $o = @($script:oldIdentities | Where-Object { $_.App -eq $a }) | Select-Object -First 1
+        $users = @($script:oldSqlUsers | Where-Object { $_.App -eq $a })
+        $lines = @()
+        if ($o) {
+            $lines += "$a signs in as its system-assigned identity ($($o.PrincipalId)); the template switches it to its own identity $($o.Identity)."
+            $lines += 'Once it works with that one, remove what the old identity was given (Azure deletes the old identity with the switch, not its roles):'
+            foreach ($ra in @($o.Assignments)) {
+                $lines += "az role assignment delete --ids $($ra.id)"
+                $lines += "  $($ra.roleDefinitionName) on $($ra.scope)"
+            }
+            if (-not @($o.Assignments).Count) { $lines += '(it has no role assignments)' }
+        } else { $lines += "$a signs in as its own identity now; once it works with it, drop the database users of its old system-assigned identity:" }
+        foreach ($u in $users) { $lines += "DROP USER [$($u.User.Replace(']', ']]'))];   -- in $($u.Database) on $($u.Server), as its Entra admin" }
+        Add-Step "Remove the old identity's access of $a" 'this PowerShell window (az), and the databases named (SSMS or the portal''s query editor)' $lines
     }
     if ($steps.Count) {
         Head 'Next steps (by hand)'
@@ -3493,6 +5101,8 @@ function Invoke-Remove {
     if ($script:ui) { Send ([ordered]@{ t = 'env'; env = $envAbbr; ghEnv = $ghEnv; saved = $true }) }
     $envFile = Join-Path $infra "environments\$envAbbr.json"
     $saved = Read-Json $envFile
+    # Every name it deletes by: by its naming rule first (refused, nothing removed, when one breaks it).
+    Assert-SavedNames $saved "infra/environments/$envAbbr.json"
     $rgDef = $defs | Where-Object { $_.ask -eq 'group' } | Select-Object -First 1
     $rgName = [string]$saved.names.($rgDef.key)
 
@@ -3528,12 +5138,36 @@ function Invoke-Remove {
         if ($saved.groups) { $group = [string]$saved.groups.($def.key) }
         Mark $def.key $name $state $group
     }
-    # The apps' identities, for their roles on a shared vault elsewhere.
-    $identities = @(foreach ($def in @($defs | Where-Object { $_.armType -eq 'Microsoft.Web/sites' -and $saved.names.($_.key) })) { Try-Az @('webapp', 'show', '-g', $rgName, '-n', $saved.names.($def.key)) })
+    # The identities of the apps that are deleted (their own, or the system-assigned one of an entry without
+    # one): their role assignments go first, wherever they are (on a vault shared from another group they'd stay
+    # as "unknown"); then the apps, then the apps' own identities (the map's removeOrder).
+    $identities = @(foreach ($def in @($defs | Where-Object { ($_.identity -or $identityAppTypes -contains [string]$_.armType) -and $saved.names.($_.key) })) {
+            $appName = [string]$saved.names.($def.key)
+            if (-not @($ours | Where-Object { $_.name -eq $appName -and $_.type -ieq $def.armType }).Count) { continue }
+            $app = $null
+            $identityName = ''
+            if ($def.identity) { $identityName = [string]$saved.names.([string]$def.identity) }
+            else { $app = Show-App ([string]$def.armType) $rgName $appName }
+            $ident = Get-AppIdentity $def $rgName $identityName $app
+            if (-not $ident) { continue }
+            [pscustomobject]@{ App = $appName; Name = $ident.Name; Assignments = @(Get-RoleAssignments $ident.PrincipalId) }
+        })
     $deployDef = $defs | Where-Object { $_.ask -eq 'name' -and $_.type -eq 'deploy' } | Select-Object -First 1
     $deployApp = [string]$saved.names.($deployDef.key)
-    $entra = @(Invoke-Az @('ad', 'app', 'list', '--display-name', $deployApp)) | Where-Object { $_ } | Select-Object -First 1
+    # By the saved client ids; by name only what you alone own (Resolve-EntraApp): never someone else's.
+    $deployIdAnswer = Get-DeployClientIdAnswer ([string]$deployDef.key)
+    $deployFound = Resolve-EntraApp $deployApp ([string]$saved.$deployIdAnswer) $deployIdAnswer
+    $entra = $deployFound.App
+    if ($deployFound.Problem) { Note "Entra: app registration ${deployApp}: $($deployFound.Problem); not deleted" }
     if ($entra) { Mark $deployDef.key $deployApp 'ours' '' }
+    # The sign-in app registrations of the container apps, deleted when asked.
+    $signInRegs = @(foreach ($def in @(Get-SignInDefs | Where-Object { $saved.names.($_.key) })) {
+            $appName = [string]$saved.names.($def.key)
+            $idAnswer = Get-SignInClientIdAnswer ([string]$def.key)
+            $found = Resolve-EntraApp $appName ([string]$saved.$idAnswer) $idAnswer '' -SignIn
+            if ($found.Problem) { Note "Entra: sign-in of ${appName}: $($found.Problem); not deleted" }
+            if ($found.App) { [pscustomobject]@{ App = $appName; AppId = [string]$found.App.appId; Answer = $idAnswer } }
+        })
     $haveGh = $ghExe -and (Test-Gh @('auth', 'status'))
     $repo = [string]$saved.repo
     $haveEnv = $haveGh -and $repo -and (Test-Gh @('api', "repos/$repo/environments/$ghEnv"))
@@ -3547,16 +5181,18 @@ function Invoke-Remove {
     else { Note "Azure, in resource group ${rgName}:" }
     foreach ($r in $ours) { Note ("  delete  {0,-52} {1}" -f $r.name, $r.type) }
     foreach ($r in $others) { Note ("  keep    {0,-52} {1} (not made by the setup)" -f $r.name, $r.type) }
+    foreach ($i in @($identities | Where-Object { @($_.Assignments).Count })) { Note ("  delete  {0,-52} first: {1} role assignment(s) of {2}" -f "roles of $($i.App)", @($i.Assignments).Count, $i.Name) }
     foreach ($def in @($defs | Where-Object { $_.groupParam -and $saved.groups -and $saved.groups.($_.key) })) {
         Note ("  keep    {0,-52} shared from {1}" -f $saved.names.($def.key), $saved.groups.($def.key))
     }
     if ($entra) { Note "Entra: app registration $deployApp (GitHub Actions' sign-in to Azure) and its service principal" }
+    foreach ($s in $signInRegs) { Note "Entra: app registration $($s.App) ($($s.AppId)), the sign-in in front of $($s.App): asked (restorable for 30 days)" }
     if ($haveEnv) { Note "GitHub: environment $ghEnv of $repo (its variables, deployment token and branch rule)" }
     elseif (-not $haveGh) { Note "GitHub: not checked (no GitHub CLI); delete the environment $ghEnv by hand: https://github.com/$repo/settings/environments" }
     if ($vaultOurs) { Note "Key Vault $($vaultOurs.name): deleted vaults stay recoverable for 30 days and keep their name; you are asked whether to purge it" }
     Note 'Not touched: the DNS records (listed at the end), the code, the workflows.'
 
-    if (-not $ours.Count -and -not $entra -and -not $haveEnv) {
+    if (-not $ours.Count -and -not $entra -and -not $haveEnv -and -not $signInRegs.Count) {
         Ok 'nothing of this environment is left'
     } else {
         Say ''
@@ -3578,14 +5214,11 @@ function Invoke-Remove {
             Ok "app registration $deployApp deleted"
             Mark $deployDef.key $deployApp 'gone' ''
         }
-        # An app's role on a shared vault elsewhere would stay as an "unknown" principal: removed first.
-        foreach ($vdef in @($defs | Where-Object { $_.armType -eq 'Microsoft.KeyVault/vaults' -and $saved.groups -and $saved.groups.($_.key) })) {
-            $vaultId = "/subscriptions/$($saved.subscriptionId)/resourceGroups/$($saved.groups.($vdef.key))/providers/$($vdef.armType)/$($saved.names.($vdef.key))"
-            foreach ($app in $identities) {
-                if (-not ($app -and $app.identity -and $app.identity.principalId)) { continue }
-                Try-Az @('role', 'assignment', 'delete', '--assignee', $app.identity.principalId, '--scope', $vaultId) | Out-Null
-                Ok "the access of $($app.name) to the shared vault $($saved.names.($vdef.key)) removed"
-            }
+        # The apps' role assignments first: one left on something kept (a vault shared from another group) would
+        # stay as an "unknown" principal.
+        foreach ($i in $identities) {
+            foreach ($ra in @($i.Assignments)) { Try-Az @('role', 'assignment', 'delete', '--ids', $ra.id) | Out-Null }
+            if (@($i.Assignments).Count) { Ok "$(@($i.Assignments).Count) role assignment(s) of $($i.Name) ($($i.App)) removed" }
         }
         if ($wholeGroup) {
             Note "deleting resource group $rgName (a few minutes)..."
@@ -3597,9 +5230,17 @@ function Invoke-Remove {
             }
             foreach ($def in $defs) { if ($saved.names.($def.key) -and -not ($saved.groups -and $saved.groups.($def.key)) -and $def.ask -ne 'name') { Mark $def.key $saved.names.($def.key) 'gone' '' } }
         } elseif ($ours.Count) {
-            # In the map's removeOrder: apps before their plan, the plan and the workspace last.
-            $order = @($map.removeOrder | ForEach-Object { $_.ToLower() })
-            $sorted = @($ours | Sort-Object { $i = [array]::IndexOf($order, $_.type.ToLower()); if ($i -lt 0) { 99 } else { $i } })
+            # In the map's removeOrder: apps before their plan, the plan and the workspace last; the apps' own
+            # identities after the apps (also in a map whose removeOrder doesn't say so).
+            # (container apps before their environment and registry also in a map whose removeOrder doesn't say so)
+            $order = @(Get-ContainerRemoveOrder @($map.removeOrder) | ForEach-Object { $_.ToLower() })
+            $lastApp = -1
+            foreach ($t in $identityAppTypes) { $at = [array]::IndexOf($order, $t.ToLower()); if ($at -gt $lastApp) { $lastApp = $at } }
+            $sorted = @($ours | Sort-Object {
+                    $i = [array]::IndexOf($order, $_.type.ToLower())
+                    if ($_.type -ieq $identityType -and $i -le $lastApp) { if ($lastApp -lt 0) { 99.5 } else { $lastApp + 0.5 } }
+                    elseif ($i -lt 0) { 99 } else { $i }
+                })
             foreach ($r in $sorted) {
                 Invoke-Az @('resource', 'delete', '--ids', $r.id) | Out-Null
                 Ok "$($r.name) deleted"
@@ -3607,6 +5248,8 @@ function Invoke-Remove {
                 if ($def) { Mark $def.key $r.name 'gone' '' }
             }
         }
+        # The container apps' sign-in app registrations, after their apps (each asked).
+        foreach ($s in $signInRegs) { Remove-SignInRegistration $s.App $s.AppId $s.Answer }
         if ($vaultOurs) {
             $deleted = Try-Az @('keyvault', 'show-deleted', '--name', $vaultOurs.name)
             if ($deleted -and (Confirm-Step "Purge Key Vault $($vaultOurs.name) now (frees its name; its secrets can't be recovered then)?" -DefaultNo -Danger)) {

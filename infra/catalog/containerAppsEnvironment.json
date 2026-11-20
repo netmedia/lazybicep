@@ -1,0 +1,26 @@
+{
+  "kind": "containerAppsEnvironment",
+  "title": "Container Apps environment",
+  "about": "Where container apps run, like an App Service plan for many apps: a workload-profiles environment with the Consumption profile (billed per use, scales to zero). Its logs go to a Log Analytics workspace of the map through a diagnostic setting (no shared key).",
+  "addable": true,
+  "keyDefault": "containerEnv",
+  "naming": { "type": "contenv" },
+  "requires": [
+    { "kind": "logAnalytics", "question": "Which Log Analytics workspace keeps the logs of <title>?", "connection": { "kind": "logs", "what": "keeps its logs in", "via": "a diagnostic setting (no shared key)" } }
+  ],
+  "entry": {
+    "key": "<key>",
+    "title": "<title>",
+    "label": "<title> (Consumption)",
+    "type": "contenv",
+    "armType": "Microsoft.App/managedEnvironments",
+    "ask": "own",
+    "apiVersion": "2025-07-01",
+    "param": "<key>Name",
+    "kind": "containerAppsEnvironment",
+    "role": "Container Apps environment (Consumption profile): the container apps run in it, its logs go to Log Analytics",
+    "cost": { "kind": "table", "order": 41, "label": "Container Apps environment {name} (Consumption)", "prices": {}, "text": "per use: the apps' vCPU and memory seconds while they run, beyond a monthly free grant per subscription" }
+  },
+  "providers": ["Microsoft.App", "Microsoft.OperationalInsights", "Microsoft.Insights"],
+  "removeOrder": { "types": ["Microsoft.App/managedEnvironments"], "before": ["Microsoft.OperationalInsights/workspaces"] }
+}
