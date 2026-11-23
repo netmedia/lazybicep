@@ -6,6 +6,11 @@ with `.\initintoproject.ps1 <project>\infra -Update`. What is built but not yet 
 
 ## 0.2.1 (on `develop`; not tagged yet)
 
+- **The developer guide in Word is made by the `netmedia-document` plugin**, as every Netmedia document: the
+  Netmedia cover, contents, styles and document history. `docs/documents.json` lists the document (source, title,
+  version from `infra/kit.json`, history); `docs/build-documents.ps1` builds it (`-Pdf` for a PDF too). pandoc and
+  `docs/tools/build-docx.ps1` are no longer needed.
+
 - **A container app's own address**: `{<key>.host}` of a `containerApp` is made from its name and its
   environment's default domain (`<name>.<domain>`; internal ingress `<name>.internal.<domain>`), not from its
   `ingress.fqdn`, so the app may use it in its own settings without a cycle (`Mcp__PublicBaseUrl =
