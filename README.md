@@ -114,8 +114,8 @@ Why it is built this way: [`docs/architecture/`](docs/architecture/README.md).
 | `examples/spec.containerapp.json` | A container app with sign-in (new environment and registry) next to a Flex Consumption function app, Key Vault |
 | `docs/architecture/` | Why the kit builds infrastructure the way it does (managed identities, Container Apps): the first chapters of Netmedia's Infrastructure Architecture Guide |
 | `docs/DEVELOPER-GUIDE.md` | Installing LazyBicep, adding it to a project and every workflow, with diagrams and screenshots |
-| `docs/LazyBicep-Developer-Guide.docx` | The same guide in Word, in Netmedia's document template (`docs/tools/build-docx.ps1` makes it) |
-| `docs/tools/` | `screenshots.ps1` (the guide's UI screenshots, from the Contoso Shop demo) and `build-docx.ps1` |
+| `docs/LazyBicep-Developer-Guide.docx` | The same guide in Word, made with the `netmedia-document` plugin as every Netmedia document (cover, contents, document history): `docs/build-documents.ps1` builds what `docs/documents.json` lists |
+| `docs/tools/` | `screenshots.ps1` (the guide's UI screenshots, from the Contoso Shop demo) |
 | `CHANGELOG.md` | What changed, newest first |
 | `docs/TODO.md` | What is built but not yet run against Azure, and what was left out on purpose |
 | `LICENSE` | MIT |

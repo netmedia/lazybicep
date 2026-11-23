@@ -1,0 +1,20 @@
+{
+  "$comment": "LazyBicep's Word documents, built with the netmedia-document plugin: docs/build-documents.ps1 (or python <netmedia-document>/scripts/netmedia_document.py --documents docs/documents.json). Paths are relative to this file.",
+  "author": "Netmedia",
+  "language": "en",
+  "documents": [
+    {
+      "out": "LazyBicep-Developer-Guide.docx",
+      "source": "DEVELOPER-GUIDE.md",
+      "title": "LazyBicep",
+      "subtitle": "Developer Guide",
+      "version": { "file": "../infra/kit.json", "key": "version" },
+      "history": [
+        ["14.11.2026", "0.1.0", "First version: install, add to a project, the terminal UI, workflows, diagrams and screenshots"],
+        ["20.11.2026", "0.2.0", "Container Apps and app-owned identities"],
+        ["20.11.2026", "0.2.1", "Container app address, sign-in and tenant tokens, project tags and regions"],
+        ["23.11.2026", "0.2.1", "Built with netmedia-document: the Netmedia cover, contents and document history, as every Netmedia document"]
+      ]
+    }
+  ]
+}
